@@ -1,0 +1,6 @@
+# VBAN to BlackHole Audio Receiver Dependencies
+# Python 3.9+ recommended
+
+sounddevice>=0.4.6
+numpy>=1.21.0
+soundfile>=0.12.1
