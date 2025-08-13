@@ -371,8 +371,13 @@ async def run(args) -> int:
                 stream_name = data[8:24].split(b"\x00", 1)[0].decode("ascii", errors="ignore")
                 frame_counter = int.from_bytes(data[24:28], "little", signed=False)
 
-                # Channel count from header (low 5 bits + 1), may be unreliable
-                hdr_channels = int(format_nbc & 0x1F) + 1
+                # Channel count from header: full byte per spec (1..256). Map 0->256 for robustness.
+                nbc_raw = int(format_nbc)
+                hdr_channels = 256 if nbc_raw == 0 else nbc_raw
+                if hdr_channels < 1:
+                    hdr_channels = 1
+                elif hdr_channels > 256:
+                    hdr_channels = 256
 
                 # Occasionally log parsed header details to help debugging
                 now_ts = time.monotonic()
