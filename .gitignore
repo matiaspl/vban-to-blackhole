@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.venv/
+venv/
+.venv_build/
+.venv_build_gui/
+
+# Build artifacts
+build/
+dist/
+*.spec
+
+# Test/coverage
+.pytest_cache/
+.coverage
+
+# Local outputs
+dump.raw
+mirror.wav
+
+# IDE
+.vscode/
+.idea/
+
