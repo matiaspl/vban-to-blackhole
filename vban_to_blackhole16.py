@@ -7,6 +7,7 @@ import socket
 import sys
 import time
 from typing import Optional
+from collections import deque
 
 import numpy as np
 import sounddevice as sd
@@ -323,8 +324,9 @@ async def run(args) -> int:
         vu_meter = VUMeter(args.channels, sample_rate=args.sample_rate)
         last_vu_update = 0.0
         last_header_log = 0.0
-        # Jitter measurement (EWMA of arrival-time deviation)
+        # Jitter measurement (EWMA + recent deviations for p95/max)
         jitter_ewma = 0.0
+        jitter_devs = deque(maxlen=512)  # seconds
         last_arrival_ts: Optional[float] = None
         last_frame_counter: Optional[int] = None
 
@@ -397,16 +399,25 @@ async def run(args) -> int:
                     expected_period = max(1.0 / float(max(1, args.sample_rate)), hdr_samples_per_frame / float(max(1, args.sample_rate)))
                     deviation = abs((now_ts - last_arrival_ts) - expected_period)
                     jitter_ewma += (deviation - jitter_ewma) / 16.0
+                    jitter_devs.append(deviation)
                 last_arrival_ts = now_ts
                 last_frame_counter = frame_counter
 
                 # Occasionally log parsed header details to help debugging
                 if now_ts - last_header_log > 1.0:
+                    # Compute jitter metrics
+                    if len(jitter_devs) > 0:
+                        arr = np.fromiter(jitter_devs, dtype=np.float64)
+                        p95_ms = float(np.percentile(arr, 95)) * 1000.0
+                        max_ms = float(np.max(arr)) * 1000.0
+                    else:
+                        p95_ms = 0.0
+                        max_ms = 0.0
                     datatype_index = int(format_bit & 0x07)
                     reserved_bit = int((format_bit >> 3) & 0x01)
                     codec_index = int((format_bit >> 4) & 0x0F)
                     logger.info(
-                        "VBAN hdr: stream='%s' sr_idx=0x%02x nbs=%d nbc=%d bit=0x%02x (dt=%d codec=%d%s) frame=%d jit=%.2fms",
+                        "VBAN hdr: stream='%s' sr_idx=0x%02x nbs=%d nbc=%d bit=0x%02x (dt=%d codec=%d%s) frame=%d jit=%.2fms p95=%.2fms max=%.2fms",
                         stream_name,
                         format_sr,
                         hdr_samples_per_frame,
@@ -417,6 +428,8 @@ async def run(args) -> int:
                         ", reserved=1" if reserved_bit else "",
                         frame_counter,
                         jitter_ewma * 1000.0,
+                        p95_ms,
+                        max_ms,
                     )
                     last_header_log = now_ts
 
@@ -703,8 +716,16 @@ async def run(args) -> int:
                     vu_meter.update(audio)
                     now = time.monotonic()
                     if now - last_vu_update > 0.1:
+                        # Compute jitter p95/max for header line
+                        if len(jitter_devs) > 0:
+                            arr = np.fromiter(jitter_devs, dtype=np.float64)
+                            p95_ms = float(np.percentile(arr, 95)) * 1000.0
+                            max_ms = float(np.max(arr)) * 1000.0
+                        else:
+                            p95_ms = 0.0
+                            max_ms = 0.0
                         print("\033[2J\033[H")
-                        print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {args.channels} ch @ {args.sample_rate} Hz | jitter {jitter_ewma*1000.0:.2f} ms")
+                        print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {args.channels} ch @ {args.sample_rate} Hz")
                         print(vu_meter.draw())
                         vu_meter.decay_peaks()
                         last_vu_update = now
