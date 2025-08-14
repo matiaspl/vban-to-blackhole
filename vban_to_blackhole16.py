@@ -505,89 +505,7 @@ async def run(args) -> int:
                     chosen_payload = payload[:usable]
                     chosen_header = VBAN_HEADER_SIZE
 
-                # Optional: auto-detect sample format and byte order using heuristics on current payload
-                if (args.input_format is None or args.input_format == "auto") and args.auto_format:
-                    candidates = [
-                        ("pcm16", "little"), ("pcm16", "big"),
-                        ("pcm16u", "little"), ("pcm16u", "big"),
-                        ("pcm24", "little"), ("pcm24", "big"),
-                        ("pcm32", "little"), ("pcm32", "big"),
-                        ("float32", "little"), ("float32", "big"),
-                    ]
-                    def eval_candidate(fmt: str, bo: str) -> tuple[float, tuple[str, str]]:
-                        try:
-                            if fmt == "pcm16":
-                                dt = "<i2" if bo == "little" else ">i2"
-                                a = np.frombuffer(chosen_payload, dtype=dt)
-                                if a.size % in_channels:
-                                    return -1e9, (fmt, bo)
-                                frames_c = a.size // in_channels
-                                audio_c = (a.astype(np.float32) / 32768.0).reshape(frames_c, in_channels)
-                            elif fmt == "pcm16u":
-                                dt = "<u2" if bo == "little" else ">u2"
-                                a = np.frombuffer(chosen_payload, dtype=dt)
-                                if a.size % in_channels:
-                                    return -1e9, (fmt, bo)
-                                frames_c = a.size // in_channels
-                                audio_c = (((a.astype(np.float32) - 32768.0) / 32768.0).reshape(frames_c, in_channels))
-                            elif fmt == "pcm24":
-                                bpf = in_channels * 3
-                                use = (len(chosen_payload) // bpf) * bpf
-                                if use == 0:
-                                    return -1e9, (fmt, bo)
-                                raw = np.frombuffer(chosen_payload[:use], dtype=np.uint8).reshape(-1, 3)
-                                if bo == "little":
-                                    vals = (raw[:, 0].astype(np.int32) | (raw[:, 1].astype(np.int32) << 8) | (raw[:, 2].astype(np.int32) << 16))
-                                else:
-                                    vals = (raw[:, 2].astype(np.int32) | (raw[:, 1].astype(np.int32) << 8) | (raw[:, 0].astype(np.int32) << 16))
-                                sign_bit = 1 << 23
-                                vals = (vals ^ sign_bit) - sign_bit
-                                frames_c = vals.size // in_channels
-                                audio_c = (vals.astype(np.float32) / 8388608.0).reshape(frames_c, in_channels)
-                            elif fmt == "pcm32":
-                                dt = "<i4" if bo == "little" else ">i4"
-                                a = np.frombuffer(chosen_payload, dtype=dt)
-                                if a.size % in_channels:
-                                    return -1e9, (fmt, bo)
-                                frames_c = a.size // in_channels
-                                audio_c = (a.astype(np.float32) / 2147483648.0).reshape(frames_c, in_channels)
-                            elif fmt == "float32":
-                                dt = "<f4" if bo == "little" else ">f4"
-                                a = np.frombuffer(chosen_payload, dtype=dt)
-                                if a.size % in_channels:
-                                    return -1e9, (fmt, bo)
-                                frames_c = a.size // in_channels
-                                audio_c = a.astype(np.float32, copy=False).reshape(frames_c, in_channels)
-                            else:
-                                return -1e9, (fmt, bo)
-                            # Score: prefer RMS in [-35,-3] dBFS, avoid DC and extreme peaks
-                            audio_c = np.nan_to_num(audio_c, nan=0.0, posinf=1.0, neginf=-1.0)
-                            rms = np.sqrt(np.mean(np.square(audio_c), axis=0) + 1e-20)
-                            rms_db = 20.0 * np.log10(rms)
-                            peak = np.max(np.abs(audio_c), axis=0)
-                            dc = np.mean(audio_c, axis=0)
-                            score = 0.0
-                            score -= float(np.sum(np.abs(dc) > 0.02)) * 0.5
-                            score -= float(np.sum(peak > 0.999)) * 0.5
-                            for v in rms_db:
-                                if -35.0 <= v <= -3.0:
-                                    score += 1.0
-                                else:
-                                    score -= 0.1
-                            return float(score), (fmt, bo)
-                        except Exception:
-                            return -1e9, (fmt, bo)
-
-                    best_score = -1e9
-                    best_sel = (decoder, args.byte_order)
-                    for fmt, bo in candidates:
-                        s, sel = eval_candidate(fmt, bo)
-                        if s > best_score:
-                            best_score = s
-                            best_sel = sel
-                    decoder, args.byte_order = best_sel
-                    if args.verbose:
-                        logger.info("Auto-selected format=%s byte_order=%s (score=%.2f) for in_ch=%d", decoder, args.byte_order, best_score, in_channels)
+                # No auto-format detection; rely on explicit --input-format and --byte-order
 
                 # Decode into float32 [-1, 1], shape (frames, in_channels)
                 if decoder == "pcm16":
@@ -865,9 +783,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--output-device", default="BlackHole 16ch", help="Output device name or index")
     p.add_argument("--buffer", type=int, default=16, help="Internal frame queue size (audio blocks)")
     p.add_argument("--in-channels", type=int, default=None, help="Override input (sender) channel count; fallback to VBAN header if not set")
-    p.add_argument("--input-format", choices=["auto","pcm8","pcm16","pcm16u","pcm24","pcm32","float16","float32"], default=None, help="Sender sample format; 'auto' to detect")
+    p.add_argument("--input-format", choices=["pcm8","pcm16","pcm16u","pcm24","pcm32","float16","float32"], default=None, help="Sender sample format; if unset, defaults to pcm16")
     p.add_argument("--byte-order", choices=["little","big"], default="little", help="Byte order of sender samples")
-    p.add_argument("--auto-format", action="store_true", help="Auto-detect input format/byte order from payload")
     p.add_argument("--dump-seconds", type=float, default=None, help="Dump decoded interleaved samples for N seconds to --dump-file")
     p.add_argument("--dump-file", type=str, default=None, help="Output file path for sample dump (raw)")
     p.add_argument("--dump-format", choices=["f32le","f16le","i16le","i24le","i32le"], default="f32le", help="Raw format for dumped samples")

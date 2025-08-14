@@ -96,9 +96,8 @@ python3 vban_to_blackhole16.py --verbose
 | `--channels` | `2` | Number of output channels (to device/WAV) |
 | `--output-device` | `BlackHole 16ch` | Output device name or index |
 | `--in-channels` |  | Override input (sender) channel count |
-| `--input-format` | `auto` | `auto`, `pcm8`, `pcm16`, `pcm16u`, `pcm24`, `pcm32`, `float16`, `float32` |
+| `--input-format` |  | `pcm8`, `pcm16`, `pcm16u`, `pcm24`, `pcm32`, `float16`, `float32` (default: pcm16) |
 | `--byte-order` | `little` | `little` or `big` |
-| `--auto-format` | `False` | Auto-detect format/byte order per packet |
 | `--gain` | `1.0` | Output gain multiplier |
 | `--device-blocksize` | `256` | Frames per block sent to device |
 | `--jitter-ms` | `10.0` | Initial jitter buffer before starting playback |
