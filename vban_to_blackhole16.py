@@ -8,6 +8,7 @@ import sys
 import time
 from typing import Optional
 from collections import deque
+import threading
 
 import numpy as np
 import sounddevice as sd
@@ -77,7 +78,7 @@ class VUMeter:
             # Normalize to 0-1 range for bar
             bar_level = max(0.0, min(1.0, (db + 60.0) / 60.0))
             bar_width = int(bar_level * self.width)
-
+            
             # Compute peak position on the same scale
             peak_level = max(0.0, min(1.0, (peak_db + 60.0) / 60.0))
             peak_pos = int(peak_level * (self.width - 1))
@@ -153,8 +154,84 @@ class WavWriter:
                 self.closed = True
 
 
+class AudioRingBuffer:
+    """Lock-protected ring buffer for multi-channel float32 audio.
+
+    Stores shape (capacity_frames, channels) float32. Supports writer (UDP task)
+    and reader (audio callback) from different threads.
+    """
+
+    def __init__(self, capacity_frames: int, channels: int):
+        self.capacity = max(1, capacity_frames)
+        self.channels = max(1, channels)
+        self.buffer = np.zeros((self.capacity, self.channels), dtype=np.float32)
+        self.read_pos = 0
+        self.write_pos = 0
+        self.size = 0  # number of frames available
+        self.lock = threading.Lock()
+
+    def available(self) -> int:
+        with self.lock:
+            return self.size
+
+    def write(self, frames: np.ndarray) -> int:
+        if frames is None or frames.size == 0:
+            return 0
+        assert frames.shape[1] == self.channels, "channel mismatch"
+        n = frames.shape[0]
+        with self.lock:
+            # If incoming exceeds capacity, keep last portion
+            if n >= self.capacity:
+                frames = frames[-self.capacity:, :]
+                n = frames.shape[0]
+                self.read_pos = 0
+                self.write_pos = 0
+                self.size = 0
+            # Ensure space by dropping oldest if needed
+            free_space = self.capacity - self.size
+            if n > free_space:
+                drop = n - free_space
+                self.read_pos = (self.read_pos + drop) % self.capacity
+                self.size -= drop
+                if self.size < 0:
+                    self.size = 0
+            # Write possibly in two segments
+            first = min(n, self.capacity - self.write_pos)
+            if first > 0:
+                self.buffer[self.write_pos:self.write_pos + first, :] = frames[:first, :]
+            remaining = n - first
+            if remaining > 0:
+                self.buffer[0:remaining, :] = frames[first:, :]
+            self.write_pos = (self.write_pos + n) % self.capacity
+            self.size += n
+            if self.size > self.capacity:
+                self.size = self.capacity
+            return n
+
+    def read_into(self, out: np.ndarray) -> int:
+        """Fill out with available frames; zero-pad remainder. Returns frames copied."""
+        frames_req = out.shape[0]
+        with self.lock:
+            to_read = min(frames_req, self.size)
+            # Read in up to two segments
+            first = min(to_read, self.capacity - self.read_pos)
+            if first > 0:
+                out[:first, :] = self.buffer[self.read_pos:self.read_pos + first, :]
+            rem = to_read - first
+            if rem > 0:
+                out[first:first + rem, :] = self.buffer[0:rem, :]
+            # Zero-pad if not enough frames
+            if to_read < frames_req:
+                out[to_read:frames_req, :].fill(0.0)
+            self.read_pos = (self.read_pos + to_read) % self.capacity
+            self.size -= to_read
+            if self.size < 0:
+                self.size = 0
+            return to_read
+
+
 async def audio_playback(
-    queue: asyncio.Queue,
+    ring: AudioRingBuffer,
     sample_rate: int,
     channels: int,
     output_device: int | str,
@@ -163,54 +240,43 @@ async def audio_playback(
     blocksize_frames: int = 0,
     output_dtype: str = "float32",
     wav_writer: "WavWriter | None" = None,
+    warmup_frames: int = 0,
 ):
-    """Continuously pull numpy float32 frames from queue and write to output device.
+    """Callback-driven audio playback that pulls from a ring buffer.
 
-    Expects queue items shaped (N, channels), dtype=float32 in range [-1.0, 1.0].
+    Note: Device stream is forced to float32 to match CoreAudio best path.
     """
+
+    # Always use float32 to the device for best compatibility/quality
+    out_dtype = "float32"
+    def callback(outdata, frames, time_info, status):
+        # outdata is a numpy array of shape (frames, channels)
+        try:
+            ring.read_into(outdata)
+        except Exception as exc:
+            # Fill silence on error
+            outdata.fill(0)
+
+    # Optionally wait for warmup/jitter buffer
+    if warmup_frames > 0:
+        while not stop_event.is_set() and ring.available() < warmup_frames:
+            await asyncio.sleep(0.001)
+
     stream = sd.OutputStream(
         device=output_device,
         samplerate=sample_rate,
         channels=channels,
-        dtype=output_dtype,
+        dtype=out_dtype,
         blocksize=blocksize_frames,
         latency="low",
+        callback=callback,
     )
     
     try:
         stream.start()
-        logger.info("Audio output: device='%s', sr=%d Hz, ch=%d", output_device, sample_rate, channels)
-        
+        logger.info("Audio output: device='%s', sr=%d Hz, ch=%d, dtype=%s", output_device, sample_rate, channels, out_dtype)
         while not stop_event.is_set():
-            try:
-                block = await asyncio.wait_for(queue.get(), timeout=0.02)
-                if block is None:
-                    break
-                if output_dtype == "float32":
-                    out = block.astype(np.float32, copy=False)
-                    stream.write(out)
-                    if wav_writer:
-                        wav_writer.write(out)
-                elif output_dtype == "int16":
-                    out = np.clip(block * 32767.0, -32768.0, 32767.0).astype(np.int16)
-                    stream.write(out)
-                    if wav_writer:
-                        wav_writer.write(out)
-                elif output_dtype == "int32":
-                    out = np.clip(block * 2147483647.0, -2147483648.0, 2147483647.0).astype(np.int32)
-                    stream.write(out)
-                    if wav_writer:
-                        wav_writer.write(out)
-                else:
-                    out = block.astype(np.float32, copy=False)
-                    stream.write(out)
-                    if wav_writer:
-                        wav_writer.write(out)
-            except asyncio.TimeoutError:
-                continue
-            except Exception as exc:
-                logger.error("Audio playback error: %s", exc)
-                break
+            await asyncio.sleep(0.05)
     finally:
         try:
             stream.stop()
@@ -269,8 +335,16 @@ async def run(args) -> int:
         logger.info("Tip: run with --list-devices to see available outputs")
         return 2
 
-    # Shared queue for decoded audio blocks
+    # Legacy queue no longer used after ring buffer migration (kept for compatibility but unused)
     queue: asyncio.Queue = asyncio.Queue(maxsize=args.buffer)
+
+    # Precompute buffering parameters used by both tasks
+    device_blocksize = max(1, args.device_blocksize)
+    jitter_frames = int(max(0.0, args.jitter_ms) * args.sample_rate / 1000.0)
+
+    # Initialize ring buffer sized for ~1s of audio or 4x jitter buffer, whichever larger
+    ring_capacity = max(args.sample_rate, 4 * max(1, jitter_frames))
+    ring = AudioRingBuffer(capacity_frames=ring_capacity, channels=args.channels)
 
     # Stop event and signal handling
     stop_event = asyncio.Event()
@@ -321,6 +395,7 @@ async def run(args) -> int:
         sock.bind((args.listen_ip, args.listen_port))
         sock.setblocking(False)
 
+        # Initialize after first packet if auto-sizing output channels
         vu_meter = VUMeter(args.channels, sample_rate=args.sample_rate)
         last_vu_update = 0.0
         last_header_log = 0.0
@@ -352,8 +427,9 @@ async def run(args) -> int:
         # Assemble consistent device block sizes to reduce jitter/warble
         device_blocksize = max(1, args.device_blocksize)
         jitter_frames = int(max(0, args.jitter_ms) * args.sample_rate / 1000)
-        assemble = np.empty((0, args.channels), dtype=np.float32)
-        started_playback = False
+        # Deprecated assemble path replaced by ring buffer
+        assemble = None
+        started_playback = True
         try:
             while not stop_event.is_set():
                 try:
@@ -490,7 +566,7 @@ async def run(args) -> int:
                     payload = data[hs:]
                     if not payload:
                         continue
-
+                        
                     # Prefer spec header values when --in-channels is not provided
                     if in_channels is None:
                         in_channels_candidate = hdr_channels
@@ -641,16 +717,47 @@ async def run(args) -> int:
                 # Ensure writable contiguous float32 buffer for safe processing
                 audio = np.array(audio, dtype=np.float32, copy=True, order="C")
 
-                # Map channels from source to desired output size
-                # If the sender has fewer channels than requested, place them in the first channels and zero the rest.
-                # If the sender has more channels, truncate to the requested count.
-                if in_channels != args.channels:
-                    if in_channels < args.channels:
-                        out = np.zeros((frames, args.channels), dtype=np.float32)
-                        out[:, :min(in_channels, args.channels)] = audio[:, :min(in_channels, args.channels)]
-                        audio = out
-                    else:
-                        audio = audio[:, :args.channels]
+                # Auto-size output channel count unless explicitly set
+                out_channels = args.channels
+                if 'auto_channels_selected' not in locals():
+                    auto_channels_selected = False
+                if not auto_channels_selected and (args.channels is None or args.channels <= 0):
+                    out_channels = min(hdr_channels, sd.query_devices(find_output_device(args.output_device)[0])['max_output_channels'])
+                    # Recreate VU meter with actual channel count
+                    vu_meter = VUMeter(out_channels, sample_rate=args.sample_rate)
+                    auto_channels_selected = True
+                elif args.channels is not None and args.channels > 0:
+                    out_channels = args.channels
+
+                # Apply mapping: parse once
+                if 'parsed_map' not in locals():
+                    parsed_map = None
+                    if args.map:
+                        try:
+                            parsed = [int(x.strip()) for x in args.map.split(',') if x.strip() != '']
+                            parsed_map = parsed
+                        except Exception:
+                            parsed_map = None
+
+                # Build output using mapping or default 1:1 with pad/truncate
+                if parsed_map is not None:
+                    out = np.zeros((frames, len(parsed_map)), dtype=np.float32)
+                    for out_idx, src_ch_1b in enumerate(parsed_map):
+                        if src_ch_1b <= 0:
+                            continue  # mute
+                        src_idx = src_ch_1b - 1
+                        if 0 <= src_idx < in_channels:
+                            out[:, out_idx] = audio[:, src_idx]
+                    audio = out
+                    out_channels = audio.shape[1]
+                else:
+                    if in_channels != out_channels:
+                        if in_channels < out_channels:
+                            out = np.zeros((frames, out_channels), dtype=np.float32)
+                            out[:, :min(in_channels, out_channels)] = audio[:, :min(in_channels, out_channels)]
+                            audio = out
+                        else:
+                            audio = audio[:, :out_channels]
 
                 # Apply gain and sanitize values
                 if args.gain != 1.0:
@@ -711,8 +818,8 @@ async def run(args) -> int:
                         dump_fh = None
                         dump_enabled = False
                             
-                # Update VU and screen (if not verbose)
-                if not args.verbose:
+                # Update VU and screen (show by default; also allow forcing with --show-jitter)
+                if (not args.verbose) or args.show_jitter:
                     vu_meter.update(audio)
                     now = time.monotonic()
                     if now - last_vu_update > 0.1:
@@ -724,57 +831,26 @@ async def run(args) -> int:
                         else:
                             p95_ms = 0.0
                             max_ms = 0.0
-                        print("\033[2J\033[H")
+                        print("\033[2J\033[H", flush=True)
+                        display_channels = int(audio.shape[1]) if audio.ndim == 2 else (args.channels or 0)
                         if args.show_jitter:
-                            print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {args.channels} ch @ {args.sample_rate} Hz | jit p95 {p95_ms:.2f} ms, max {max_ms:.2f} ms")
+                            print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {display_channels} ch @ {args.sample_rate} Hz | jit {p95_ms:.2f}/{max_ms:.2f} ms (p95/max)", flush=True)
                         else:
-                            print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {args.channels} ch @ {args.sample_rate} Hz")
-                        print(vu_meter.draw())
+                            print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {display_channels} ch @ {args.sample_rate} Hz", flush=True)
+                        print(vu_meter.draw(), flush=True)
                         vu_meter.decay_peaks()
                         last_vu_update = now
-
-                # Assemble fixed-size blocks before enqueue
-                if audio.shape[0] < device_blocksize:
-                    assemble = np.concatenate([assemble, audio], axis=0)
-                else:
-                    assemble = np.concatenate([assemble, audio], axis=0)
-                # Start after jitter buffer is accumulated
-                if not started_playback:
-                    if assemble.shape[0] >= max(device_blocksize, jitter_frames):
-                        started_playback = True
-                # Push out in device-blocksize chunks once started
-                if started_playback:
-                    while assemble.shape[0] >= device_blocksize:
-                        out_block = assemble[:device_blocksize, :]
-                        assemble = assemble[device_blocksize:, :]
-                        try:
-                            queue.put_nowait(out_block)
-                        except asyncio.QueueFull:
-                            try:
-                                _ = queue.get_nowait()
-                                queue.put_nowait(out_block)
-                            except Exception:
-                                pass
-                    # If playback queue is starving, optionally pad one block of zeros to keep clock steady
-                    if args.starve_fill and queue.empty() and assemble.shape[0] == 0:
-                        try:
-                            queue.put_nowait(np.zeros((device_blocksize, args.channels), dtype=np.float32))
-                        except Exception:
-                            pass
-        finally:
-            # Flush any remaining assembled frames
-            try:
-                if assemble is not None and assemble.shape[0] > 0:
+                    
+                # Write decoded audio into ring buffer
+                ring.write(audio)
+                # Mirror to WAV immediately from decode path to avoid starving the callback
+                if wav_writer is not None:
                     try:
-                        queue.put_nowait(assemble)
-                    except asyncio.QueueFull:
-                        try:
-                            _ = queue.get_nowait()
-                            queue.put_nowait(assemble)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+                        wav_writer.write(audio)
+                    except Exception:
+                        pass
+        finally:
+            # No assemble flush needed with ring buffer
             sock.close()
 
     # Optional WAV mirror writer
@@ -794,7 +870,7 @@ async def run(args) -> int:
     receiver_task = asyncio.create_task(udp_receive_decode())
     playback_task = asyncio.create_task(
         audio_playback(
-            queue=queue,
+            ring=ring,
             sample_rate=args.sample_rate,
             channels=args.channels,
             output_device=device_index,
@@ -803,6 +879,7 @@ async def run(args) -> int:
             blocksize_frames=max(1, args.device_blocksize),
             output_dtype=output_dtype,
             wav_writer=wav_writer,
+            warmup_frames=max(device_blocksize, jitter_frames) if args.starve_fill else 0,
         )
     )
 
@@ -861,6 +938,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--list-devices", action="store_true", help="List available output devices and exit")
     p.add_argument("--verbose", action="store_true", help="Verbose logging")
     p.add_argument("--show-jitter", action="store_true", help="Show jitter stats in VU header")
+    p.add_argument("--map", type=str, default=None, help="Output mapping: comma-separated input channel per output (1-based), 0=mute")
     p.add_argument("--gain", type=float, default=1.0, help="Output gain multiplier (applied post-decode)")
     return p
 
