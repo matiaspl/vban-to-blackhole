@@ -362,7 +362,8 @@ async def run(args) -> int:
 
                 if len(data) < VBAN_HEADER_SIZE or data[:4] != VBAN_MAGIC:
                     continue
-
+                # Get source IP and port from socket
+                src_ip, src_port = addr
                 # Parse VBAN audio header fields (spec-compliant indexes)
                 # SR, nbs (samples-1), nbc (channels-1), bit (datatype+codec)
                 format_sr = data[4]
@@ -690,7 +691,7 @@ async def run(args) -> int:
                     now = time.monotonic()
                     if now - last_vu_update > 0.1:
                         print("\033[2J\033[H")
-                        print(f"VBAN Audio Monitor - {args.channels} channels @ {args.sample_rate} Hz")
+                        print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {args.channels} channels @ {args.sample_rate} Hz")
                         print(vu_meter.draw())
                         vu_meter.decay_peaks()
                         last_vu_update = now
