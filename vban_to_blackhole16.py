@@ -406,10 +406,37 @@ async def run(args) -> int:
                     )
                     last_header_log = now_ts
 
-                # Choose decoder from explicit input format if provided; otherwise try to infer (PCM16 default)
-                decoder = args.input_format
-                if decoder is None or decoder == "auto":
-                    decoder = "pcm16"
+                # Determine decoder from header bit-field by default; allow explicit CLI override
+                codec_value = int(format_bit) & 0xF0
+                datatype_index = int(format_bit) & 0x07
+                if codec_value != 0x00:
+                    if args.verbose:
+                        logger.warning("Non-PCM VBAN codec (0x%02x) not supported; dropping packet", codec_value)
+                    continue
+
+                header_decoder = None
+                header_bps = None
+                if datatype_index == 0x00:
+                    header_decoder, header_bps = "pcm8", 1
+                elif datatype_index == 0x01:
+                    header_decoder, header_bps = "pcm16", 2
+                elif datatype_index == 0x02:
+                    header_decoder, header_bps = "pcm24", 3
+                elif datatype_index == 0x03:
+                    header_decoder, header_bps = "pcm32", 4
+                elif datatype_index == 0x04:
+                    header_decoder, header_bps = "float32", 4
+                elif datatype_index == 0x05:
+                    if args.verbose:
+                        logger.warning("FLOAT64 payload not supported; dropping packet")
+                    continue
+                else:
+                    if args.verbose:
+                        logger.warning("%d-bit packed payload (index=0x%02x) not supported; dropping packet", 12 if datatype_index==0x06 else 10, datatype_index)
+                    continue
+
+                # CLI override (if provided) takes precedence
+                decoder = args.input_format or header_decoder
                 if decoder == "pcm8":
                     bps = 1
                 elif decoder == "pcm16":
@@ -421,9 +448,8 @@ async def run(args) -> int:
                 elif decoder == "float32":
                     bps = 4
                 else:
-                    # Unknown selection, fallback to pcm16
-                    decoder = "pcm16"
-                    bps = 2
+                    decoder = header_decoder
+                    bps = header_bps
 
                 # Determine effective header size (some senders use 32 bytes). Try 28 then 32, choose one that fits frames.
                 header_sizes = [VBAN_HEADER_SIZE, 32] if len(data) >= 32 else [VBAN_HEADER_SIZE]
