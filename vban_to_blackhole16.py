@@ -437,36 +437,48 @@ async def run(args) -> int:
                     payload = data[hs:]
                     if not payload:
                         continue
-                        
-                    # If input channels not fixed, attempt to infer from payload length and bytes-per-sample
+
+                    # Prefer spec header values when --in-channels is not provided
                     if in_channels is None:
+                        in_channels_candidate = hdr_channels
+                        bpf_hdr = in_channels_candidate * bps
+                        expected_bytes_hdr = hdr_samples_per_frame * bpf_hdr if bpf_hdr else 0
+                        if (
+                            bpf_hdr > 0
+                            and hdr_samples_per_frame > 0
+                            and hdr_samples_per_frame <= 256
+                            and len(payload) >= expected_bytes_hdr
+                            and (len(payload) % bpf_hdr) == 0
+                        ):
+                            frames = len(payload) // bpf_hdr
+                            if frames > 0 and frames <= 256:
+                                chosen_header = hs
+                                chosen_payload = payload[: expected_bytes_hdr if expected_bytes_hdr > 0 else len(payload)]
+                                in_channels = in_channels_candidate
+                                break
+                        # If header doesn't match payload cleanly, try inference as fallback
                         best_ch = None
                         best_remainder = None
                         best_frames = 0
-                        # Search 1..16 channels for clean divisibility and <=256 frames per packet
                         for ch in range(1, 33):
                             bpf = ch * bps
                             if bpf == 0:
                                 continue
                             frames = len(payload) // bpf
                             remainder = len(payload) % bpf
-                            if frames == 0:
+                            if frames == 0 or frames > 256:
                                 continue
-                            if frames > 256:
-                                continue
-                            if best_remainder is None or remainder < best_remainder or (remainder == best_remainder and frames > best_frames):
+                            if (
+                                best_remainder is None
+                                or remainder < best_remainder
+                                or (remainder == best_remainder and frames > best_frames)
+                            ):
                                 best_remainder = remainder
                                 best_ch = ch
                                 best_frames = frames
                                 if remainder == 0 and ch in (2, 4, 6, 8, 16):
-                                    # Prefer typical channel counts when exact fit
                                     break
-
-                        if best_ch is not None:
-                            in_channels_candidate = best_ch
-                        else:
-                            # Fallback to header if inference failed
-                            in_channels_candidate = hdr_channels
+                        in_channels_candidate = best_ch if best_ch is not None else hdr_channels
                     else:
                         in_channels_candidate = in_channels
 
