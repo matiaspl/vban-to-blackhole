@@ -725,7 +725,10 @@ async def run(args) -> int:
                             p95_ms = 0.0
                             max_ms = 0.0
                         print("\033[2J\033[H")
-                        print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {args.channels} ch @ {args.sample_rate} Hz")
+                        if args.show_jitter:
+                            print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {args.channels} ch @ {args.sample_rate} Hz | jit p95 {p95_ms:.2f} ms, max {max_ms:.2f} ms")
+                        else:
+                            print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {args.channels} ch @ {args.sample_rate} Hz")
                         print(vu_meter.draw())
                         vu_meter.decay_peaks()
                         last_vu_update = now
@@ -857,6 +860,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--starve-fill", action="store_true", help="If playback starves, insert a block of silence to maintain clock")
     p.add_argument("--list-devices", action="store_true", help="List available output devices and exit")
     p.add_argument("--verbose", action="store_true", help="Verbose logging")
+    p.add_argument("--show-jitter", action="store_true", help="Show jitter stats in VU header")
     p.add_argument("--gain", type=float, default=1.0, help="Output gain multiplier (applied post-decode)")
     return p
 

@@ -102,6 +102,7 @@ python3 vban_to_blackhole16.py --verbose
 | `--device-blocksize` | `256` | Frames per block sent to device |
 | `--jitter-ms` | `10.0` | Initial jitter buffer before starting playback |
 | `--starve-fill` | `False` | Insert silence if playback starves |
+| `--show-jitter` | `False` | Show jitter p95/max in the VU header |
 | `--wav-path` |  | Mirror device stream to WAV file |
 | `--wav-dtype` | `float32` | WAV dtype: `float32`, `int16`, `int32` |
 | `--dump-seconds` |  | Duration to dump raw/decoded samples |
