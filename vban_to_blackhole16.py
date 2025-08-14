@@ -363,28 +363,46 @@ async def run(args) -> int:
                 if len(data) < VBAN_HEADER_SIZE or data[:4] != VBAN_MAGIC:
                     continue
 
-                # Parse VBAN audio header fields (best-effort; some senders deviate)
+                # Parse VBAN audio header fields (spec-compliant indexes)
+                # SR, nbs (samples-1), nbc (channels-1), bit (datatype+codec)
                 format_sr = data[4]
-                format_nbc = data[5]
-                format_bit = data[6]
-                format_codec = data[7]
+                format_nbs = data[5]
+                format_nbc = data[6]
+                format_bit = data[7]
                 stream_name = data[8:24].split(b"\x00", 1)[0].decode("ascii", errors="ignore")
                 frame_counter = int.from_bytes(data[24:28], "little", signed=False)
 
-                # Channel count from header: full byte per spec (1..256). Map 0->256 for robustness.
+                # Samples per frame and channels from header: stored as (value-1)
                 nbc_raw = int(format_nbc)
-                hdr_channels = 256 if nbc_raw == 0 else nbc_raw
+                nbs_raw = int(format_nbs)
+                hdr_channels = nbc_raw + 1
+                hdr_samples_per_frame = nbs_raw + 1
                 if hdr_channels < 1:
                     hdr_channels = 1
                 elif hdr_channels > 256:
                     hdr_channels = 256
+                if hdr_samples_per_frame < 1:
+                    hdr_samples_per_frame = 1
+                elif hdr_samples_per_frame > 256:
+                    hdr_samples_per_frame = 256
 
                 # Occasionally log parsed header details to help debugging
                 now_ts = time.monotonic()
                 if now_ts - last_header_log > 1.0:
+                    datatype_index = int(format_bit & 0x07)
+                    reserved_bit = int((format_bit >> 3) & 0x01)
+                    codec_index = int((format_bit >> 4) & 0x0F)
                     logger.info(
-                        "VBAN hdr: stream='%s' codec=0x%02x bit=0x%02x nbc=0x%02x (hdr_ch=%d)",
-                        stream_name, format_codec, format_bit, format_nbc, hdr_channels,
+                        "VBAN hdr: stream='%s' sr_idx=0x%02x nbs=%d nbc=%d bit=0x%02x (dt=%d codec=%d%s) frame=%d",
+                        stream_name,
+                        format_sr,
+                        hdr_samples_per_frame,
+                        hdr_channels,
+                        format_bit,
+                        datatype_index,
+                        codec_index,
+                        ", reserved=1" if reserved_bit else "",
+                        frame_counter,
                     )
                     last_header_log = now_ts
 
