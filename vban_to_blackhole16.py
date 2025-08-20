@@ -308,13 +308,27 @@ def find_output_device(name_or_index: str | int) -> tuple[int, str]:
     raise ValueError(f"Output device not found matching '{name_or_index}'. Use --list-devices to inspect.")
 
 
-def list_output_devices() -> str:
-    lines = ["Available output devices (PortAudio):"]
-    for idx, dev in enumerate(sd.query_devices()):
-        max_out = dev.get("max_output_channels", 0)
-        if max_out > 0:
-            lines.append(f"  [{idx:2d}] {dev.get('name')}  (max_out_ch={max_out})")
-    return "\n".join(lines)
+def list_output_devices(json_output: bool = False) -> str:
+    if json_output:
+        # JSON output format
+        devices = []
+        for idx, dev in enumerate(sd.query_devices()):
+            max_out = dev.get("max_output_channels", 0)
+            if max_out > 0:
+                devices.append({
+                    "index": idx,
+                    "name": dev.get("name"),
+                    "max_output_channels": max_out
+                })
+        return json.dumps({"type": "devices", "devices": devices}, indent=2)
+    else:
+        # Human-readable output format
+        lines = ["Available output devices (PortAudio):"]
+        for idx, dev in enumerate(sd.query_devices()):
+            max_out = dev.get("max_output_channels", 0)
+            if max_out > 0:
+                lines.append(f"  [{idx:2d}] {dev.get('name')}  (max_out_ch={max_out})")
+        return "\n".join(lines)
 
 
 async def run(args) -> int:
@@ -326,14 +340,14 @@ async def run(args) -> int:
     logger.addHandler(handler)
 
     if args.list_devices:
-        print(list_output_devices())
+        print(list_output_devices(args.json))
         return 0
 
     try:
         device_index, device_name = find_output_device(args.output_device)
     except Exception as exc:
         logger.error("%s", exc)
-        logger.info("Tip: run with --list-devices to see available outputs")
+        logger.info("Tip: run with --list-devices to inspect")
         return 2
 
     # Legacy queue no longer used after ring buffer migration (kept for compatibility but unused)
@@ -445,6 +459,27 @@ async def run(args) -> int:
         # Deprecated assemble path replaced by ring buffer
         assemble = None
         started_playback = True
+                # Initialize tracking variables
+        received_frame_counters = set()
+        stream_loss_tracking = {}
+        last_frame_counter = None
+        
+        def reset_stream_tracking(frame_counter: int):
+            """Reset tracking when wraparound is detected"""
+            if args.verbose:
+                logger.info(f"🔄 Wraparound detected: frame {frame_counter}, resetting tracking")
+            
+            # Reset expected frame counter
+            nonlocal expected_frame_counter
+            expected_frame_counter = frame_counter + 1
+            
+            # Clear received frame counters (start fresh)
+            received_frame_counters.clear()
+            received_frame_counters.add(frame_counter)
+            
+            # Reset loss tracking
+            stream_loss_tracking.clear()
+        
         try:
             while not stop_event.is_set():
                 try:
@@ -493,18 +528,63 @@ async def run(args) -> int:
                     jitter_devs.append(deviation)
                 last_arrival_ts = now_ts
                 
+                # Check for wraparound (0xFFFFFFFF -> 0)
+                if expected_frame_counter is not None and expected_frame_counter > 0x7FFFFFFF:
+                    if frame_counter < expected_frame_counter - 0x7FFFFFFF:
+                        # Likely wraparound - reset tracking
+                        reset_stream_tracking(frame_counter)
+                
+                # Also check if frame_counter itself wrapped around
+                if last_frame_counter is None:
+                    last_frame_counter = frame_counter
+                elif frame_counter < last_frame_counter and last_frame_counter > 0x7FFFFFFF:
+                    # Frame counter wrapped around - reset tracking
+                    reset_stream_tracking(frame_counter)
+                last_frame_counter = frame_counter
+                
                 # Packet loss detection using frame counter
                 if expected_frame_counter is not None:
-                    if frame_counter == expected_frame_counter:
+                    # Check if this frame number has already been received (true duplicate)
+                    if frame_counter in received_frame_counters:
+                        # This is a true duplicate - sender sent the same packet number twice
                         duplicate_packets += 1
-                    elif frame_counter != expected_frame_counter + 1:
-                        # Calculate how many packets were lost
-                        if frame_counter > expected_frame_counter:
-                            lost_packets += frame_counter - expected_frame_counter - 1
-                        else:
-                            # Frame counter wrapped around or reset
-                            lost_packets += 1
-                expected_frame_counter = frame_counter + 1
+                    elif frame_counter > expected_frame_counter:
+                        # Packet is ahead of expected - some packets were lost
+                        lost_count = frame_counter - expected_frame_counter - 1
+                        if lost_count > 0:
+                            # Sanity check: don't count unrealistic losses
+                            if lost_count < 1000000:  # Max 1M packets lost at once
+                                lost_packets += lost_count
+                                if args.verbose:
+                                    logger.warning(f"❌ LOST: {lost_count} packets before frame {frame_counter}")
+                            else:
+                                # Unrealistic loss count - likely wraparound issue
+                                if args.verbose:
+                                    logger.warning(f"⚠️  Wraparound detected: frame {frame_counter} after {expected_frame_counter} (gap: {lost_count})")
+                                reset_stream_tracking(frame_counter)
+                                continue  # Skip this packet after reset
+                        
+                        # Update expected to this packet + 1
+                        expected_frame_counter = frame_counter + 1
+                        # Add to received set
+                        received_frame_counters.add(frame_counter)
+                    elif frame_counter < expected_frame_counter - 1:
+                        # Packet is behind expected - out of order delivery (not a duplicate)
+                        # Don't count as lost, just update expected if this packet is newer
+                        if frame_counter > expected_frame_counter - 1:
+                            expected_frame_counter = frame_counter + 1
+                        # Add to received set
+                        received_frame_counters.add(frame_counter)
+                    else:
+                        # frame_counter == expected_frame_counter - 1 (normal sequential)
+                        expected_frame_counter = frame_counter + 1
+                        # Add to received set
+                        received_frame_counters.add(frame_counter)
+                else:
+                    # First packet - initialize expected to next sequential number
+                    expected_frame_counter = frame_counter + 1
+                    # Add to received set
+                    received_frame_counters.add(frame_counter)
                 
                 # Update bitrate statistics with rolling window
                 total_bytes_received += len(data)

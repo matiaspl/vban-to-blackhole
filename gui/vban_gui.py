@@ -39,6 +39,7 @@ class App(QtWidgets.QWidget):
         self.resize(820, 560)
 
         self.worker: Worker | None = None
+        self.device_info_cache = {}  # Cache device information for channel detection
 
         self._build_ui()
 
@@ -75,7 +76,9 @@ class App(QtWidgets.QWidget):
 
         row += 1
         form.addWidget(QtWidgets.QLabel("Output Device:"), row, 0)
-        self.output_device = QtWidgets.QLineEdit("BlackHole 16ch")
+        self.output_device = QtWidgets.QComboBox()
+        self.output_device.setEditable(True)  # Allow custom device names
+        self.output_device.setMinimumWidth(300)
         form.addWidget(self.output_device, row, 1, 1, 3)
 
         row += 1
@@ -102,15 +105,15 @@ class App(QtWidgets.QWidget):
         self.start_btn = QtWidgets.QPushButton("Start")
         self.stop_btn = QtWidgets.QPushButton("Stop")
         self.stop_btn.setEnabled(False)
-        self.list_btn = QtWidgets.QPushButton("List Devices")
+        self.refresh_btn = QtWidgets.QPushButton("Refresh Sources")
         self.start_btn.clicked.connect(self.on_start)
         self.stop_btn.clicked.connect(self.on_stop)
-        self.list_btn.clicked.connect(self.on_list_devices)
+        self.refresh_btn.clicked.connect(self.on_refresh_sources)
         
 
         btns.addWidget(self.start_btn)
         btns.addWidget(self.stop_btn)
-        btns.addWidget(self.list_btn)
+        btns.addWidget(self.refresh_btn)
         layout.addLayout(btns)
 
 
@@ -137,8 +140,8 @@ class App(QtWidgets.QWidget):
         self.jitter_max_label = QtWidgets.QLabel("--")
         self.jitter_p95_label.setMinimumWidth(50)
         self.jitter_max_label.setMinimumWidth(50)
-        self.jitter_p95_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.jitter_max_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.jitter_p95_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.jitter_max_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         jitter_section.addWidget(self.jitter_p95_label)
         jitter_section.addWidget(QtWidgets.QLabel("/"))
         jitter_section.addWidget(self.jitter_max_label)
@@ -152,7 +155,7 @@ class App(QtWidgets.QWidget):
         bitrate_section.addWidget(QtWidgets.QLabel("Bitrate:"))
         self.bitrate_value_label = QtWidgets.QLabel("--")
         self.bitrate_value_label.setMinimumWidth(70)
-        self.bitrate_value_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.bitrate_value_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         bitrate_section.addWidget(self.bitrate_value_label)
         bitrate_section.addWidget(QtWidgets.QLabel("Mbps"))
         bitrate_section.addStretch()  # Allow this section to expand
@@ -170,10 +173,10 @@ class App(QtWidgets.QWidget):
         self.packets_lost_label.setMinimumWidth(40)
         self.packets_dup_label.setMinimumWidth(40)
         self.packet_loss_rate_label.setMinimumWidth(50)
-        self.packets_received_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.packets_lost_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.packets_dup_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
-        self.packet_loss_rate_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.packets_received_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.packets_lost_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.packets_dup_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.packet_loss_rate_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         packets_section.addWidget(self.packets_received_label)
         packets_section.addWidget(QtWidgets.QLabel("R/"))
         packets_section.addWidget(self.packets_lost_label)
@@ -191,7 +194,7 @@ class App(QtWidgets.QWidget):
         rate_section.addWidget(QtWidgets.QLabel("Rate:"))
         self.packet_rate_label = QtWidgets.QLabel("--")
         self.packet_rate_label.setMinimumWidth(60)
-        self.packet_rate_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.packet_rate_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         rate_section.addWidget(self.packet_rate_label)
         rate_section.addWidget(QtWidgets.QLabel("/s"))
         rate_section.addStretch()  # Allow this section to expand
@@ -203,6 +206,12 @@ class App(QtWidgets.QWidget):
         
         # Create 16 VU meters by default showing minimal values
         self.create_default_vu_meters()
+        
+        # Populate device list on startup
+        self.populate_device_list()
+        
+        # Connect text change signal for editable combo box
+        self.output_device.currentTextChanged.connect(self.on_device_selection_changed)
 
     def create_default_vu_meters(self):
         """Create 16 VU meters by default showing minimal values."""
@@ -332,22 +341,69 @@ class App(QtWidgets.QWidget):
         if self.worker is not None:
             return
         backend = self.backend_path()
+        
+        # Get selected device from userData, but skip "Custom..." option
+        selected_device = self.output_device.currentData()
+        if selected_device == "Custom...":
+            QtWidgets.QMessageBox.warning(self, "Device Selection", "Please select a valid device from the dropdown or type a custom device name.")
+            return
+        
+        # If the device is editable and user typed something custom, use that
+        if self.output_device.isEditable() and selected_device:
+            # Allow custom device names
+            pass
+        elif not selected_device or selected_device.strip() == "":
+            QtWidgets.QMessageBox.warning(self, "Device Selection", "Please select a valid device from the dropdown.")
+            return
+        
+        print(f"DEBUG: Starting with device: '{selected_device}'")  # Debug output
+        
+        # Get the device's channel count from the current selection
+        selected_index = self.output_device.currentIndex()
+        device_channels = None
+        
+        # Get the device data from userData (which contains the actual device info)
+        device_data = self.output_device.currentData()
+        print(f"DEBUG: Current device data: '{device_data}'")
+        
+        # If we have device data and it's not "Custom...", get channel count from cache
+        if device_data and device_data != "Custom...":
+            if device_data in self.device_info_cache:
+                device_info = self.device_info_cache[device_data]
+                device_channels = device_info.get("max_output_channels", 0)
+                print(f"DEBUG: Found device '{device_data}' with {device_channels} channels in cache")
+            else:
+                print(f"DEBUG: Device '{device_data}' not found in cache")
+        else:
+            print(f"DEBUG: No valid device data found: '{device_data}'")
+        
         cmd = ([backend] if backend.endswith("vban-backend") else [sys.executable, backend]) + [
             "--listen-ip", self.listen_ip.text().strip() or "0.0.0.0",
             "--listen-port", self.listen_port.text().strip() or "6980",
-            "--output-device", self.output_device.text().strip() or "BlackHole 16ch",
+            "--output-device", selected_device,
+        ]
+        
+        # Add channels parameter if we detected the device's channel count
+        if device_channels and device_channels > 0:
+            cmd.extend(["--channels", str(device_channels)])
+            print(f"DEBUG: Added --channels {device_channels} to command")
+        
+        cmd.extend([
             "--jitter-ms", self.jitter_ms.text().strip() or "20",
             "--device-blocksize", self.blocksize.text().strip() or "1024",
             "--starve-fill",
             "--show-jitter",
             "--show-network",
             "--json",
-        ]
+        ])
+        
         if not self.starve_fill.isChecked():
             cmd.remove("--starve-fill")
         map_str = self.map_entry.text().strip()
         if map_str:
             cmd += ["--map", map_str]
+
+        print(f"DEBUG: Command: {cmd}")  # Debug output
 
         self.worker = Worker(cmd)
         self.worker.line.connect(self.on_backend_line)
@@ -400,6 +456,101 @@ class App(QtWidgets.QWidget):
         except Exception:
             return
         self.update_stats(obj)
+
+    def populate_device_list(self):
+        """Populate the device dropdown with available output devices"""
+        try:
+            backend = self.backend_path()
+            if backend.endswith("vban-backend"):
+                cmd = [backend, "--list-devices", "--json"]
+            else:
+                cmd = [sys.executable, backend, "--list-devices", "--json"]
+            
+            out = subprocess.check_output(cmd, text=True)
+            
+            # Parse JSON output
+            try:
+                data = json.loads(out)
+                if data.get("type") == "devices" and "devices" in data:
+                    devices = data["devices"]
+                    print(f"DEBUG: Parsed {len(devices)} devices from JSON")
+                    
+                    # Clear existing items
+                    self.output_device.clear()
+                    
+                    # Add devices to dropdown with channel information
+                    for device in devices:
+                        device_name = device.get("name", "")
+                        channel_count = device.get("max_output_channels", 0)
+                        
+                        if device_name:
+                            if channel_count > 0:
+                                display_text = f"{device_name} ({channel_count} ch)"
+                            else:
+                                display_text = device_name
+                            
+                            # Store original name as user data for backend communication
+                            self.output_device.addItem(display_text, userData=device_name)
+                            
+                            # Cache device information for channel detection
+                            self.device_info_cache[device_name] = {
+                                "name": device_name,
+                                "max_output_channels": channel_count,
+                                "index": device.get("index", -1)
+                            }
+                            
+                            print(f"DEBUG: Added device: {display_text}")
+                    
+                    # Try to set "BlackHole 16ch" as default if it exists
+                    blackhole_index = -1
+                    for i in range(self.output_device.count()):
+                        if "BlackHole 16ch" in self.output_device.itemText(i):
+                            blackhole_index = i
+                            break
+                    
+                    if blackhole_index >= 0:
+                        self.output_device.setCurrentIndex(blackhole_index)
+                        print("DEBUG: Set BlackHole 16ch as default")
+                    elif self.output_device.count() > 0:
+                        # Set first device as default if BlackHole not found
+                        self.output_device.setCurrentIndex(0)
+                        print("DEBUG: Set first device as default")
+                    
+                    # Add a custom entry option
+                    self.output_device.addItem("Custom...", userData="Custom...")
+                    
+                else:
+                    print(f"DEBUG: Invalid JSON format: {data}")
+                    self._fallback_device_list()
+                    
+            except json.JSONDecodeError as e:
+                print(f"DEBUG: JSON decode error: {e}")
+                print(f"DEBUG: Raw output: {out}")
+                self._fallback_device_list()
+                
+        except Exception as e:
+            print(f"DEBUG: Error populating device list: {e}")
+            self._fallback_device_list()
+    
+    def _fallback_device_list(self):
+        """Fallback device list if JSON parsing fails"""
+        print("DEBUG: Using fallback device list")
+        self.output_device.clear()
+        self.output_device.addItem("BlackHole 16ch", userData="BlackHole 16ch")
+        self.output_device.addItem("System Default", userData="System Default")
+        self.output_device.addItem("Custom...", userData="Custom...")
+
+    def on_device_selection_changed(self, text: str):
+        """Handle device selection changes"""
+        print(f"DEBUG: Device selection changed to: '{text}'")
+        if text == "Custom...":
+            # Clear the text when Custom... is selected
+            self.output_device.setEditText("")
+
+    def on_refresh_sources(self):
+        """Refresh the list of available audio output devices"""
+        self.populate_device_list()
+        QtWidgets.QMessageBox.information(self, "Sources Refreshed", "Audio output device list has been refreshed.")
 
 
 class VUBar(QtWidgets.QWidget):
