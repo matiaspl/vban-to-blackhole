@@ -43,6 +43,11 @@ class App(QtWidgets.QWidget):
 
         self._build_ui()
 
+    def debug_print(self, message: str):
+        """Print debug message only if verbose mode is enabled"""
+        if self.verbose.isChecked():
+            print(f"DEBUG: {message}")
+
     @staticmethod
     def resource_path(rel_path: str) -> str:
         # Resolve path to bundled resources when frozen by PyInstaller
@@ -98,6 +103,11 @@ class App(QtWidgets.QWidget):
         self.starve_fill = QtWidgets.QCheckBox("Starve fill")
         self.starve_fill.setChecked(True)
         form.addWidget(self.starve_fill, row, 0)
+        
+        # Add verbose flag checkbox
+        self.verbose = QtWidgets.QCheckBox("Verbose")
+        self.verbose.setChecked(False)
+        form.addWidget(self.verbose, row, 1)
 
         layout.addLayout(form)
 
@@ -356,7 +366,7 @@ class App(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "Device Selection", "Please select a valid device from the dropdown.")
             return
         
-        print(f"DEBUG: Starting with device: '{selected_device}'")  # Debug output
+        self.debug_print(f"Starting with device: '{selected_device}'")
         
         # Get the device's channel count from the current selection
         selected_index = self.output_device.currentIndex()
@@ -364,18 +374,18 @@ class App(QtWidgets.QWidget):
         
         # Get the device data from userData (which contains the actual device info)
         device_data = self.output_device.currentData()
-        print(f"DEBUG: Current device data: '{device_data}'")
+        self.debug_print(f"Current device data: '{device_data}'")
         
         # If we have device data and it's not "Custom...", get channel count from cache
         if device_data and device_data != "Custom...":
             if device_data in self.device_info_cache:
                 device_info = self.device_info_cache[device_data]
                 device_channels = device_info.get("max_output_channels", 0)
-                print(f"DEBUG: Found device '{device_data}' with {device_channels} channels in cache")
+                self.debug_print(f"Found device '{device_data}' with {device_channels} channels in cache")
             else:
-                print(f"DEBUG: Device '{device_data}' not found in cache")
+                self.debug_print(f"Device '{device_data}' not found in cache")
         else:
-            print(f"DEBUG: No valid device data found: '{device_data}'")
+            self.debug_print(f"No valid device data found: '{device_data}'")
         
         cmd = ([backend] if backend.endswith("vban-backend") else [sys.executable, backend]) + [
             "--listen-ip", self.listen_ip.text().strip() or "0.0.0.0",
@@ -386,7 +396,7 @@ class App(QtWidgets.QWidget):
         # Add channels parameter if we detected the device's channel count
         if device_channels and device_channels > 0:
             cmd.extend(["--channels", str(device_channels)])
-            print(f"DEBUG: Added --channels {device_channels} to command")
+            self.debug_print(f"Added --channels {device_channels} to command")
         
         cmd.extend([
             "--jitter-ms", self.jitter_ms.text().strip() or "20",
@@ -397,13 +407,17 @@ class App(QtWidgets.QWidget):
             "--json",
         ])
         
+        # Add verbose flag if checked
+        if self.verbose.isChecked():
+            cmd.append("--verbose")
+        
         if not self.starve_fill.isChecked():
             cmd.remove("--starve-fill")
         map_str = self.map_entry.text().strip()
         if map_str:
             cmd += ["--map", map_str]
 
-        print(f"DEBUG: Command: {cmd}")  # Debug output
+        self.debug_print(f"Command: {cmd}")
 
         self.worker = Worker(cmd)
         self.worker.line.connect(self.on_backend_line)
@@ -473,7 +487,7 @@ class App(QtWidgets.QWidget):
                 data = json.loads(out)
                 if data.get("type") == "devices" and "devices" in data:
                     devices = data["devices"]
-                    print(f"DEBUG: Parsed {len(devices)} devices from JSON")
+                    self.debug_print(f"Parsed {len(devices)} devices from JSON")
                     
                     # Clear existing items
                     self.output_device.clear()
@@ -499,7 +513,7 @@ class App(QtWidgets.QWidget):
                                 "index": device.get("index", -1)
                             }
                             
-                            print(f"DEBUG: Added device: {display_text}")
+                            self.debug_print(f"Added device: {display_text}")
                     
                     # Try to set "BlackHole 16ch" as default if it exists
                     blackhole_index = -1
@@ -510,31 +524,31 @@ class App(QtWidgets.QWidget):
                     
                     if blackhole_index >= 0:
                         self.output_device.setCurrentIndex(blackhole_index)
-                        print("DEBUG: Set BlackHole 16ch as default")
+                        self.debug_print("Set BlackHole 16ch as default")
                     elif self.output_device.count() > 0:
                         # Set first device as default if BlackHole not found
                         self.output_device.setCurrentIndex(0)
-                        print("DEBUG: Set first device as default")
+                        self.debug_print("Set first device as default")
                     
                     # Add a custom entry option
                     self.output_device.addItem("Custom...", userData="Custom...")
                     
                 else:
-                    print(f"DEBUG: Invalid JSON format: {data}")
+                    self.debug_print(f"Invalid JSON format: {data}")
                     self._fallback_device_list()
                     
             except json.JSONDecodeError as e:
-                print(f"DEBUG: JSON decode error: {e}")
-                print(f"DEBUG: Raw output: {out}")
+                self.debug_print(f"JSON decode error: {e}")
+                self.debug_print(f"Raw output: {out}")
                 self._fallback_device_list()
                 
         except Exception as e:
-            print(f"DEBUG: Error populating device list: {e}")
+            self.debug_print(f"Error populating device list: {e}")
             self._fallback_device_list()
     
     def _fallback_device_list(self):
         """Fallback device list if JSON parsing fails"""
-        print("DEBUG: Using fallback device list")
+        self.debug_print("Using fallback device list")
         self.output_device.clear()
         self.output_device.addItem("BlackHole 16ch", userData="BlackHole 16ch")
         self.output_device.addItem("System Default", userData="System Default")
@@ -542,7 +556,7 @@ class App(QtWidgets.QWidget):
 
     def on_device_selection_changed(self, text: str):
         """Handle device selection changes"""
-        print(f"DEBUG: Device selection changed to: '{text}'")
+        self.debug_print(f"Device selection changed to: '{text}'")
         if text == "Custom...":
             # Clear the text when Custom... is selected
             self.output_device.setEditText("")
