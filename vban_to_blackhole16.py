@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import logging
+import json
 import signal
 import socket
 import sys
@@ -404,6 +405,20 @@ async def run(args) -> int:
         jitter_devs = deque(maxlen=512)  # seconds
         last_arrival_ts: Optional[float] = None
         last_frame_counter: Optional[int] = None
+        
+        # Bitrate and packet loss tracking
+        total_bytes_received = 0
+        total_packets_received = 0
+        last_bitrate_update = time.monotonic()
+        bitrate_bps = 0.0
+        expected_frame_counter = None
+        lost_packets = 0
+        duplicate_packets = 0
+        
+        # Rolling window for bitrate calculation (last 5 seconds)
+        bitrate_window_seconds = 5.0
+        bitrate_bytes_window = deque(maxlen=1000)  # Store (timestamp, bytes) pairs
+        bitrate_packets_window = deque(maxlen=1000)  # Store (timestamp, packet_count) pairs
 
         # Optional dump-to-file for N seconds
         # If --dump-raw is set, writes raw VBAN audio payload bytes (post-header) with no conversion
@@ -477,7 +492,46 @@ async def run(args) -> int:
                     jitter_ewma += (deviation - jitter_ewma) / 16.0
                     jitter_devs.append(deviation)
                 last_arrival_ts = now_ts
-                last_frame_counter = frame_counter
+                
+                # Packet loss detection using frame counter
+                if expected_frame_counter is not None:
+                    if frame_counter == expected_frame_counter:
+                        duplicate_packets += 1
+                    elif frame_counter != expected_frame_counter + 1:
+                        # Calculate how many packets were lost
+                        if frame_counter > expected_frame_counter:
+                            lost_packets += frame_counter - expected_frame_counter - 1
+                        else:
+                            # Frame counter wrapped around or reset
+                            lost_packets += 1
+                expected_frame_counter = frame_counter + 1
+                
+                # Update bitrate statistics with rolling window
+                total_bytes_received += len(data)
+                total_packets_received += 1
+                
+                # Add current packet to rolling window
+                bitrate_bytes_window.append((now_ts, len(data)))
+                bitrate_packets_window.append((now_ts, 1))
+                
+                # Calculate bitrate from rolling window (last 5 seconds)
+                if now_ts - last_bitrate_update >= 0.5:  # Update every 500ms for smoother display
+                    # Remove old entries outside the window
+                    cutoff_time = now_ts - bitrate_window_seconds
+                    while bitrate_bytes_window and bitrate_bytes_window[0][0] < cutoff_time:
+                        bitrate_bytes_window.popleft()
+                    while bitrate_packets_window and bitrate_packets_window[0][0] < cutoff_time:
+                        bitrate_packets_window.popleft()
+                    
+                    # Calculate bitrate from window data
+                    if bitrate_bytes_window:
+                        window_bytes = sum(bytes_data for _, bytes_data in bitrate_bytes_window)
+                        window_duration = max(0.1, now_ts - bitrate_bytes_window[0][0])  # At least 100ms
+                        bitrate_bps = (window_bytes * 8) / window_duration
+                    else:
+                        bitrate_bps = 0.0
+                    
+                    last_bitrate_update = now_ts
 
                 # Occasionally log parsed header details to help debugging
                 if now_ts - last_header_log > 1.0:
@@ -492,21 +546,54 @@ async def run(args) -> int:
                     datatype_index = int(format_bit & 0x07)
                     reserved_bit = int((format_bit >> 3) & 0x01)
                     codec_index = int((format_bit >> 4) & 0x0F)
-                    logger.info(
-                        "VBAN hdr: stream='%s' sr_idx=0x%02x nbs=%d nbc=%d bit=0x%02x (dt=%d codec=%d%s) frame=%d jit=%.2fms p95=%.2fms max=%.2fms",
-                        stream_name,
-                        format_sr,
-                        hdr_samples_per_frame,
-                        hdr_channels,
-                        format_bit,
-                        datatype_index,
-                        codec_index,
-                        ", reserved=1" if reserved_bit else "",
-                        frame_counter,
-                        jitter_ewma * 1000.0,
-                        p95_ms,
-                        max_ms,
-                    )
+                    if args.json:
+                        msg = {
+                            "type": "stats",
+                            "stream": stream_name,
+                            "sr_idx": int(format_sr),
+                            "nbs": int(hdr_samples_per_frame),
+                            "nbc": int(hdr_channels),
+                            "bit": int(format_bit),
+                            "datatype": int(datatype_index),
+                            "codec": int(codec_index),
+                            "reserved": bool(reserved_bit),
+                            "frame": int(frame_counter),
+                            "jitter_ms": float(jitter_ewma * 1000.0),
+                            "jitter_p95_ms": float(p95_ms),
+                            "jitter_max_ms": float(max_ms),
+                            "bitrate_mbps": float(bitrate_bps / 1000000.0),
+                            "packets_received": int(total_packets_received),
+                            "lost_packets": int(lost_packets),
+                            "duplicate_packets": int(duplicate_packets),
+                            "packet_loss_rate": float(lost_packets / max(1, total_packets_received + lost_packets) * 100.0),
+                            "current_packet_rate": float(sum(packet_count for _, packet_count in bitrate_packets_window) / max(0.1, now_ts - bitrate_packets_window[0][0]) if bitrate_packets_window else 0.0),
+                        }
+                        print(json.dumps(msg), flush=True)
+                    else:
+                        # Calculate current packet rate from window
+                        current_packet_rate = sum(packet_count for _, packet_count in bitrate_packets_window) / max(0.1, now_ts - bitrate_packets_window[0][0]) if bitrate_packets_window else 0.0
+                        
+                        logger.info(
+                            "VBAN hdr: stream='%s' sr_idx=0x%02x nbs=%d nbc=%d bit=0x%02x (dt=%d codec=%d%s) frame=%d jit=%.2fms p95=%.2fms max=%.2fms bitrate=%.2f Mbps pkts=%d lost=%d dup=%d loss=%.2f%% pkt_rate=%.1f/s",
+                            stream_name,
+                            format_sr,
+                            hdr_samples_per_frame,
+                            hdr_channels,
+                            format_bit,
+                            datatype_index,
+                            codec_index,
+                            ", reserved=1" if reserved_bit else "",
+                            frame_counter,
+                            jitter_ewma * 1000.0,
+                            p95_ms,
+                            max_ms,
+                            bitrate_bps / 1000000.0,
+                            total_packets_received,
+                            lost_packets,
+                            duplicate_packets,
+                            lost_packets / max(1, total_packets_received + lost_packets) * 100.0,
+                            current_packet_rate,
+                        )
                     last_header_log = now_ts
 
                 # Determine decoder from header bit-field by default; allow explicit CLI override
@@ -831,13 +918,53 @@ async def run(args) -> int:
                         else:
                             p95_ms = 0.0
                             max_ms = 0.0
-                        print("\033[2J\033[H", flush=True)
-                        display_channels = int(audio.shape[1]) if audio.ndim == 2 else (args.channels or 0)
-                        if args.show_jitter:
-                            print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {display_channels} ch @ {args.sample_rate} Hz | jit {p95_ms:.2f}/{max_ms:.2f} ms (p95/max)", flush=True)
+                        if args.json:
+                            # Emit per-channel VU/peak
+                            ch_levels = []
+                            for ch in range(vu_meter.channels):
+                                lvl = float(vu_meter.levels[ch])
+                                pk = float(vu_meter.peak_hold[ch])
+                                ch_levels.append({"level": lvl, "peak": pk})
+                            # Calculate current packet rate from window
+                            current_packet_rate = sum(packet_count for _, packet_count in bitrate_packets_window) / max(0.1, now_ts - bitrate_packets_window[0][0]) if bitrate_packets_window else 0.0
+                            
+                            msg = {
+                                "type": "vu",
+                                "stream": stream_name,
+                                "channels": int(audio.shape[1]) if audio.ndim == 2 else (args.channels or 0),
+                                "sample_rate": int(args.sample_rate),
+                                "jitter_p95_ms": float(p95_ms),
+                                "jitter_max_ms": float(max_ms),
+                                "bitrate_mbps": float(bitrate_bps / 1000000.0),
+                                "packets_received": int(total_packets_received),
+                                "lost_packets": int(lost_packets),
+                                "duplicate_packets": int(duplicate_packets),
+                                "packet_loss_rate": float(lost_packets / max(1, total_packets_received + lost_packets) * 100.0),
+                                "current_packet_rate": float(current_packet_rate),
+                                "levels": ch_levels,
+                            }
+                            print(json.dumps(msg), flush=True)
                         else:
-                            print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {display_channels} ch @ {args.sample_rate} Hz", flush=True)
-                        print(vu_meter.draw(), flush=True)
+                            print("\033[2J\033[H", flush=True)
+                            display_channels = int(audio.shape[1]) if audio.ndim == 2 else (args.channels or 0)
+                            if args.show_jitter:
+                                jitter_info = f"jit {p95_ms:.2f}/{max_ms:.2f} ms (p95/max)"
+                                # Calculate current packet rate from window
+                                current_packet_rate = sum(packet_count for _, packet_count in bitrate_packets_window) / max(0.1, now_ts - bitrate_packets_window[0][0]) if bitrate_packets_window else 0.0
+                                
+                                if args.show_network:
+                                    network_info = f" | {bitrate_bps/1000000:.2f} Mbps | pkts {total_packets_received} lost {lost_packets} dup {duplicate_packets} loss {lost_packets/max(1, total_packets_received + lost_packets)*100:.2f}% | {current_packet_rate:.1f}/s"
+                                    print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {display_channels} ch @ {args.sample_rate} Hz | {jitter_info}{network_info}", flush=True)
+                                else:
+                                    print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {display_channels} ch @ {args.sample_rate} Hz | {jitter_info}", flush=True)
+                            elif args.show_network:
+                                # Calculate current packet rate from window
+                                current_packet_rate = sum(packet_count for _, packet_count in bitrate_packets_window) / max(0.1, now_ts - bitrate_packets_window[0][0]) if bitrate_packets_window else 0.0
+                                network_info = f"{bitrate_bps/1000000:.2f} Mbps | pkts {total_packets_received} lost {lost_packets} dup {duplicate_packets} loss {lost_packets/max(1, total_packets_received + lost_packets)*100:.2f}% | {current_packet_rate:.1f}/s"
+                                print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {display_channels} ch @ {args.sample_rate} Hz | {network_info}", flush=True)
+                            else:
+                                print(f"VBAN: {stream_name} ({src_ip}:{src_port}) - {display_channels} ch @ {args.sample_rate} Hz", flush=True)
+                            print(vu_meter.draw(), flush=True)
                         vu_meter.decay_peaks()
                         last_vu_update = now
                     
@@ -938,7 +1065,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--list-devices", action="store_true", help="List available output devices and exit")
     p.add_argument("--verbose", action="store_true", help="Verbose logging")
     p.add_argument("--show-jitter", action="store_true", help="Show jitter stats in VU header")
+    p.add_argument("--show-network", action="store_true", help="Show bitrate and packet loss stats in VU header")
     p.add_argument("--map", type=str, default=None, help="Output mapping: comma-separated input channel per output (1-based), 0=mute")
+    p.add_argument("--json", action="store_true", help="Emit stats as NDJSON to stdout (GUI integration)")
     p.add_argument("--gain", type=float, default=1.0, help="Output gain multiplier (applied post-decode)")
     return p
 

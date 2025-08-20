@@ -50,6 +50,17 @@ class App(QtWidgets.QWidget):
             return os.path.join(base, rel_path)
         return os.path.join(os.path.dirname(__file__), "..", rel_path)
 
+    @staticmethod
+    def backend_path() -> str:
+        # Prefer bundled backend binary if available
+        base = getattr(sys, "_MEIPASS", None)
+        if base:
+            cand = os.path.join(base, "backend", "vban-backend")
+            if os.path.exists(cand):
+                return cand
+        # Fallback to Python script
+        return App.resource_path("vban_to_blackhole16.py")
+
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -83,12 +94,7 @@ class App(QtWidgets.QWidget):
         row += 1
         self.starve_fill = QtWidgets.QCheckBox("Starve fill")
         self.starve_fill.setChecked(True)
-        self.show_jitter = QtWidgets.QCheckBox("Show jitter")
-        self.show_jitter.setChecked(True)
-        self.verbose = QtWidgets.QCheckBox("Verbose")
         form.addWidget(self.starve_fill, row, 0)
-        form.addWidget(self.show_jitter, row, 1)
-        form.addWidget(self.verbose, row, 2)
 
         layout.addLayout(form)
 
@@ -100,35 +106,165 @@ class App(QtWidgets.QWidget):
         self.start_btn.clicked.connect(self.on_start)
         self.stop_btn.clicked.connect(self.on_stop)
         self.list_btn.clicked.connect(self.on_list_devices)
+        
+
         btns.addWidget(self.start_btn)
         btns.addWidget(self.stop_btn)
         btns.addWidget(self.list_btn)
         layout.addLayout(btns)
 
-        # Stats area: jitter labels and per-channel bars
-        stats = QtWidgets.QVBoxLayout()
-        self.jitter_label = QtWidgets.QLabel("Jitter p95/max: -- / -- ms")
-        stats.addWidget(self.jitter_label)
+
+        
+        # VU meter bars - main section
+        vu_section = QtWidgets.QVBoxLayout()
+        vu_section.addWidget(QtWidgets.QLabel("VU Meters:"))
+        
         self.bars = QtWidgets.QGridLayout()
         self.bars.setHorizontalSpacing(10)
         self.bars.setVerticalSpacing(6)
-        stats.addLayout(self.bars)
-        layout.addLayout(stats, 1)
+        vu_section.addLayout(self.bars)
+        layout.addLayout(vu_section)
+        
+        # Status bar below VU meters - truly responsive horizontal layout
+        status_bar = QtWidgets.QHBoxLayout()
+        status_bar.setSpacing(20)
+        
+        # Column 1: Jitter (expandable)
+        jitter_section = QtWidgets.QHBoxLayout()
+        jitter_section.setSpacing(5)
+        jitter_section.addWidget(QtWidgets.QLabel("Jitter:"))
+        self.jitter_p95_label = QtWidgets.QLabel("--")
+        self.jitter_max_label = QtWidgets.QLabel("--")
+        self.jitter_p95_label.setMinimumWidth(50)
+        self.jitter_max_label.setMinimumWidth(50)
+        self.jitter_p95_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.jitter_max_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        jitter_section.addWidget(self.jitter_p95_label)
+        jitter_section.addWidget(QtWidgets.QLabel("/"))
+        jitter_section.addWidget(self.jitter_max_label)
+        jitter_section.addWidget(QtWidgets.QLabel("ms"))
+        jitter_section.addStretch()  # Allow this section to expand
+        status_bar.addLayout(jitter_section, 1)  # Stretch factor 1
+        
+        # Column 2: Bitrate (expandable)
+        bitrate_section = QtWidgets.QHBoxLayout()
+        bitrate_section.setSpacing(5)
+        bitrate_section.addWidget(QtWidgets.QLabel("Bitrate:"))
+        self.bitrate_value_label = QtWidgets.QLabel("--")
+        self.bitrate_value_label.setMinimumWidth(70)
+        self.bitrate_value_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        bitrate_section.addWidget(self.bitrate_value_label)
+        bitrate_section.addWidget(QtWidgets.QLabel("Mbps"))
+        bitrate_section.addStretch()  # Allow this section to expand
+        status_bar.addLayout(bitrate_section, 1)  # Stretch factor 1
+        
+        # Column 3: Packets (expandable)
+        packets_section = QtWidgets.QHBoxLayout()
+        packets_section.setSpacing(5)
+        packets_section.addWidget(QtWidgets.QLabel("Packets:"))
+        self.packets_received_label = QtWidgets.QLabel("--")
+        self.packets_lost_label = QtWidgets.QLabel("--")
+        self.packets_dup_label = QtWidgets.QLabel("--")
+        self.packet_loss_rate_label = QtWidgets.QLabel("--")
+        self.packets_received_label.setMinimumWidth(60)
+        self.packets_lost_label.setMinimumWidth(40)
+        self.packets_dup_label.setMinimumWidth(40)
+        self.packet_loss_rate_label.setMinimumWidth(50)
+        self.packets_received_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.packets_lost_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.packets_dup_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        self.packet_loss_rate_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        packets_section.addWidget(self.packets_received_label)
+        packets_section.addWidget(QtWidgets.QLabel("R/"))
+        packets_section.addWidget(self.packets_lost_label)
+        packets_section.addWidget(QtWidgets.QLabel("L/"))
+        packets_section.addWidget(self.packets_dup_label)
+        packets_section.addWidget(QtWidgets.QLabel("D/"))
+        packets_section.addWidget(self.packet_loss_rate_label)
+        packets_section.addWidget(QtWidgets.QLabel("%"))
+        packets_section.addStretch()  # Allow this section to expand
+        status_bar.addLayout(packets_section, 1)  # Stretch factor 1
+        
+        # Column 4: Rate (expandable)
+        rate_section = QtWidgets.QHBoxLayout()
+        rate_section.setSpacing(5)
+        rate_section.addWidget(QtWidgets.QLabel("Rate:"))
+        self.packet_rate_label = QtWidgets.QLabel("--")
+        self.packet_rate_label.setMinimumWidth(60)
+        self.packet_rate_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
+        rate_section.addWidget(self.packet_rate_label)
+        rate_section.addWidget(QtWidgets.QLabel("/s"))
+        rate_section.addStretch()  # Allow this section to expand
+        status_bar.addLayout(rate_section, 1)  # Stretch factor 1
+        
+        layout.addLayout(status_bar)
         self.bar_widgets: list[VUBar] = []
-        self.db_labels: list[QtWidgets.QLabel] = []
+        self.db_labels: list[tuple[QtWidgets.QLabel, QtWidgets.QLabel]] = []
+        
+        # Create 16 VU meters by default showing minimal values
+        self.create_default_vu_meters()
+
+    def create_default_vu_meters(self):
+        """Create 16 VU meters by default showing minimal values."""
+        # Create 16 channels by default
+        for i in range(16):
+            lbl = QtWidgets.QLabel(f"Ch {i+1:02d}")
+            bar = VUBar()
+            
+            # Split VU meter labels into separate fields to prevent text jumping
+            db_container = QtWidgets.QWidget()
+            db_layout = QtWidgets.QHBoxLayout(db_container)
+            db_layout.setContentsMargins(0, 0, 0, 0)
+            
+            db_layout.addWidget(QtWidgets.QLabel("Level:"))
+            db_level_label = QtWidgets.QLabel("-60.0 dB")
+            db_level_label.setMinimumWidth(70)
+            db_layout.addWidget(db_level_label)
+            
+            db_layout.addWidget(QtWidgets.QLabel("Peak:"))
+            db_peak_label = QtWidgets.QLabel("-60.0 dB")
+            db_peak_label.setMinimumWidth(70)
+            db_layout.addWidget(db_peak_label)
+            
+            # Store both labels for updating
+            self.db_labels.append((db_level_label, db_peak_label))
+            
+            self.bars.addWidget(lbl, i, 0)
+            self.bars.addWidget(bar, i, 1)
+            self.bars.addWidget(db_container, i, 2)
+            self.bar_widgets.append(bar)
+            
+            # Set minimal values (essentially silent)
+            bar.set_values(0.001, 0.001)
 
     # ===== Backend → UI bridging =====
     def update_stats(self, obj: dict):
         if obj.get("type") == "stats":
             p95 = obj.get("jitter_p95_ms", 0.0)
             mx = obj.get("jitter_max_ms", 0.0)
-            self.jitter_label.setText(f"Jitter p95/max: {p95:.2f} / {mx:.2f} ms")
+            self.jitter_p95_label.setText(f"{p95:.2f}")
+            self.jitter_max_label.setText(f"{mx:.2f}")
         elif obj.get("type") == "vu":
+            # Update network stats
+            bitrate = obj.get("bitrate_mbps", 0.0)
+            packets_received = obj.get("packets_received", 0)
+            lost_packets = obj.get("lost_packets", 0)
+            duplicate_packets = obj.get("duplicate_packets", 0)
+            packet_loss_rate = obj.get("packet_loss_rate", 0.0)
+            current_packet_rate = obj.get("current_packet_rate", 0.0)
+            
+            self.bitrate_value_label.setText(f"{bitrate:.2f}")
+            self.packets_received_label.setText(f"{packets_received}")
+            self.packets_lost_label.setText(f"{lost_packets}")
+            self.packets_dup_label.setText(f"{duplicate_packets}")
+            self.packet_loss_rate_label.setText(f"{packet_loss_rate:.2f}")
+            self.packet_rate_label.setText(f"{current_packet_rate:.1f}")
+            
             levels = obj.get("levels", [])
             ch = obj.get("channels", len(levels))
             # Create bars lazily if channel count changes
             if len(self.bar_widgets) != ch:
-                # Clear
+                # Clear existing bars (including test ones)
                 for i in reversed(range(self.bars.count())):
                     w = self.bars.itemAt(i).widget()
                     if w:
@@ -138,29 +274,53 @@ class App(QtWidgets.QWidget):
                 for i in range(ch):
                     lbl = QtWidgets.QLabel(f"Ch {i+1:02d}")
                     bar = VUBar()
-                    db_lbl = QtWidgets.QLabel("-60.0 dB  P:-60.0 dB")
-                    db_lbl.setMinimumWidth(120)
+                    
+                    # Split VU meter labels into separate fields to prevent text jumping
+                    db_container = QtWidgets.QWidget()
+                    db_layout = QtWidgets.QHBoxLayout(db_container)
+                    db_layout.setContentsMargins(0, 0, 0, 0)
+                    
+                    db_layout.addWidget(QtWidgets.QLabel("Level:"))
+                    db_level_label = QtWidgets.QLabel("-60.0 dB")
+                    db_level_label.setMinimumWidth(70)
+                    db_layout.addWidget(db_level_label)
+                    
+                    db_layout.addWidget(QtWidgets.QLabel("Peak:"))
+                    db_peak_label = QtWidgets.QLabel("-60.0 dB")
+                    db_peak_label.setMinimumWidth(70)
+                    db_layout.addWidget(db_peak_label)
+                    
+                    # Store both labels for updating
+                    self.db_labels.append((db_level_label, db_peak_label))
+                    
                     self.bars.addWidget(lbl, i, 0)
                     self.bars.addWidget(bar, i, 1)
-                    self.bars.addWidget(db_lbl, i, 2)
+                    self.bars.addWidget(db_container, i, 2)
                     self.bar_widgets.append(bar)
-                    self.db_labels.append(db_lbl)
+            
             # Update values
             import math
             for i, st in enumerate(levels[:len(self.bar_widgets)]):
                 lvl = float(st.get("level", 0.0))
                 pk = float(st.get("peak", 0.0))
                 self.bar_widgets[i].set_values(lvl, pk)
+                
                 def to_db(x: float) -> float:
                     if x <= 0.0:
                         return -60.0
                     return 20.0 * math.log10(max(1e-6, x))
-                self.db_labels[i].setText(f"{to_db(lvl):6.1f} dB  P:{to_db(pk):6.1f} dB")
+                
+                # Update separate level and peak labels
+                level_label, peak_label = self.db_labels[i]
+                level_label.setText(f"{to_db(lvl):6.1f} dB")
+                peak_label.setText(f"{to_db(pk):6.1f} dB")
 
     def on_list_devices(self):
-        exe = sys.executable
-        script = self.resource_path("vban_to_blackhole16.py")
-        cmd = [exe, script, "--list-devices"]
+        backend = self.backend_path()
+        if backend.endswith("vban-backend"):
+            cmd = [backend, "--list-devices"]
+        else:
+            cmd = [sys.executable, backend, "--list-devices"]
         try:
             out = subprocess.check_output(cmd, text=True)
         except subprocess.CalledProcessError as e:
@@ -171,10 +331,8 @@ class App(QtWidgets.QWidget):
     def on_start(self):
         if self.worker is not None:
             return
-        exe = sys.executable
-        script = self.resource_path("vban_to_blackhole16.py")
-        cmd = [
-            exe, script,
+        backend = self.backend_path()
+        cmd = ([backend] if backend.endswith("vban-backend") else [sys.executable, backend]) + [
             "--listen-ip", self.listen_ip.text().strip() or "0.0.0.0",
             "--listen-port", self.listen_port.text().strip() or "6980",
             "--output-device", self.output_device.text().strip() or "BlackHole 16ch",
@@ -182,14 +340,11 @@ class App(QtWidgets.QWidget):
             "--device-blocksize", self.blocksize.text().strip() or "1024",
             "--starve-fill",
             "--show-jitter",
+            "--show-network",
             "--json",
         ]
         if not self.starve_fill.isChecked():
             cmd.remove("--starve-fill")
-        if not self.show_jitter.isChecked():
-            cmd.remove("--show-jitter")
-        if self.verbose.isChecked():
-            cmd.append("--verbose")
         map_str = self.map_entry.text().strip()
         if map_str:
             cmd += ["--map", map_str]
@@ -205,19 +360,36 @@ class App(QtWidgets.QWidget):
         if self.worker is None:
             return
         self.worker.stop()
+        self.worker.wait()  # Wait for thread to finish
         self.worker = None
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
 
     def on_finished(self, rc: int):
         # Reset UI on stop
-        self.jitter_label.setText("Jitter p95/max: -- / -- ms")
+        self.jitter_p95_label.setText("--")
+        self.jitter_max_label.setText("--")
+        self.bitrate_value_label.setText("--")
+        self.packets_received_label.setText("--")
+        self.packets_lost_label.setText("--")
+        self.packets_dup_label.setText("--")
+        self.packet_loss_rate_label.setText("--")
+        self.packet_rate_label.setText("--")
+        
         for bar in self.bar_widgets:
             bar.set_values(0.0, 0.0)
+        
+        # Reset VU meter labels
+        for level_label, peak_label in self.db_labels:
+            level_label.setText("-60.0 dB")
+            peak_label.setText("-60.0 dB")
+        
         self.worker = None
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
 
+
+    
     @QtCore.pyqtSlot(str)
     def on_backend_line(self, line: str):
         line = line.strip()
@@ -283,118 +455,7 @@ class VUBar(QtWidgets.QWidget):
         p.drawLine(peak_x, rect.top(), peak_x, rect.bottom())
         p.end()
 
-    def update_stats(self, obj: dict):
-        if obj.get("type") == "stats":
-            p95 = obj.get("jitter_p95_ms", 0.0)
-            mx = obj.get("jitter_max_ms", 0.0)
-            self.jitter_label.setText(f"Jitter p95/max: {p95:.2f} / {mx:.2f} ms")
-        elif obj.get("type") == "vu":
-            levels = obj.get("levels", [])
-            ch = obj.get("channels", len(levels))
-            # Create bars lazily if channel count changes
-            if len(self.bar_widgets) != ch:
-                # Clear
-                for i in reversed(range(self.bars.count())):
-                    w = self.bars.itemAt(i).widget()
-                    if w:
-                        w.setParent(None)
-                self.bar_widgets.clear()
-                self.db_labels.clear()
-                for i in range(ch):
-                    lbl = QtWidgets.QLabel(f"Ch {i+1:02d}")
-                    bar = VUBar()
-                    db_lbl = QtWidgets.QLabel("-60.0 dB  P:-60.0 dB")
-                    db_lbl.setMinimumWidth(120)
-                    self.bars.addWidget(lbl, i, 0)
-                    self.bars.addWidget(bar, i, 1)
-                    self.bars.addWidget(db_lbl, i, 2)
-                    self.bar_widgets.append(bar)
-                    self.db_labels.append(db_lbl)
-            # Update values (convert linear [0..1] to dB scale 0..1000)
-            import math
-            for i, st in enumerate(levels[:len(self.bar_widgets)]):
-                lvl = float(st.get("level", 0.0))
-                pk = float(st.get("peak", 0.0))
-                self.bar_widgets[i].set_values(lvl, pk)
-                def to_db(x: float) -> float:
-                    if x <= 0.0:
-                        return -60.0
-                    return 20.0 * math.log10(max(1e-6, x))
-                self.db_labels[i].setText(f"{to_db(lvl):6.1f} dB  P:{to_db(pk):6.1f} dB")
 
-    def on_list_devices(self):
-        exe = sys.executable
-        script = os.path.join(os.path.dirname(__file__), "..", "vban_to_blackhole16.py")
-        cmd = [exe, script, "--list-devices"]
-        try:
-            out = subprocess.check_output(cmd, text=True)
-        except subprocess.CalledProcessError as e:
-            out = e.output or str(e)
-        self.append_output(out)
-
-    def on_start(self):
-        if self.worker is not None:
-            return
-        exe = sys.executable
-        script = os.path.join(os.path.dirname(__file__), "..", "vban_to_blackhole16.py")
-        cmd = [
-            exe, script,
-            "--listen-ip", self.listen_ip.text().strip() or "0.0.0.0",
-            "--listen-port", self.listen_port.text().strip() or "6980",
-            "--output-device", self.output_device.text().strip() or "BlackHole 16ch",
-            "--jitter-ms", self.jitter_ms.text().strip() or "20",
-            "--device-blocksize", self.blocksize.text().strip() or "1024",
-            "--starve-fill",
-            "--show-jitter",
-        ]
-        if not self.starve_fill.isChecked():
-            cmd.remove("--starve-fill")
-        if not self.show_jitter.isChecked():
-            cmd.remove("--show-jitter")
-        if self.verbose.isChecked():
-            cmd.append("--verbose")
-        map_str = self.map_entry.text().strip()
-        if map_str:
-            cmd += ["--map", map_str]
-
-        # Force JSON output from backend for GUI consumption
-        cmd.append("--json")
-        self.worker = Worker(cmd)
-        self.worker.line.connect(self.on_backend_line)
-        self.worker.finished.connect(self.on_finished)
-        self.worker.start()
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-
-    def on_stop(self):
-        if self.worker is None:
-            return
-        self.worker.stop()
-        self.worker = None
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-
-    def on_finished(self, rc: int):
-        # Reset UI on stop
-        self.jitter_label.setText("Jitter p95/max: -- / -- ms")
-        for bar in self.bar_widgets:
-            bar.setValue(0)
-        for pk in self.peak_widgets:
-            pk.setValue(0)
-        self.worker = None
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-
-    @QtCore.pyqtSlot(str)
-    def on_backend_line(self, line: str):
-        line = line.strip()
-        if not line:
-            return
-        try:
-            obj = json.loads(line)
-        except Exception:
-            return
-        self.update_stats(obj)
 
 
 if __name__ == "__main__":

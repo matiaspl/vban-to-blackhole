@@ -13,6 +13,8 @@ A Python application that receives VBAN (Virtual Broadcast Audio Network) audio 
 - **Jitter Buffer & Block Assembly**: Small configurable jitter buffer and fixed device blocksize to reduce dropouts
 - **WAV Mirroring**: Mirror exactly what is sent to the device into a WAV file (float32/int16/int32)
 - **Raw Dump**: Dump raw VBAN payload bytes or decoded samples for offline analysis
+- **Network Monitoring**: Real-time bitrate tracking and packet loss detection using VBAN frame counters
+- **Performance Metrics**: Jitter statistics (EWMA, p95, max) and network health indicators
 
 ## Installation
 
@@ -103,6 +105,7 @@ python3 vban_to_blackhole16.py --verbose
 | `--jitter-ms` | `10.0` | Initial jitter buffer before starting playback |
 | `--starve-fill` | `False` | Insert silence if playback starves |
 | `--show-jitter` | `False` | Show jitter p95/max in the VU header |
+| `--show-network` | `False` | Show bitrate and packet loss stats in the VU header |
 | `--wav-path` |  | Mirror device stream to WAV file |
 | `--wav-dtype` | `float32` | WAV dtype: `float32`, `int16`, `int32` |
 | `--dump-seconds` |  | Duration to dump raw/decoded samples |
@@ -136,6 +139,45 @@ python3 vban_to_blackhole16.py \
 
 When not in verbose mode, the application displays real-time ASCII VU meters with legit ballistics (~300 ms integration) and separate peak decay. A thin marker shows peak within the bar.
 
+## Network Monitoring
+
+The application provides comprehensive network performance monitoring:
+
+### Bitrate Tracking
+- **Real-time bitrate**: Calculated from rolling 5-second window of recent packets
+- **Updates every 500ms**: Provides smooth, responsive network utilization display
+- **Display format**: Mbps for easy reading
+- **Stable measurement**: Uses time-based window instead of cumulative totals
+
+### Packet Loss Detection
+- **Frame counter analysis**: Uses VBAN frame counters to detect missing packets
+- **Duplicate detection**: Identifies retransmitted or duplicate packets
+- **Loss rate calculation**: Percentage of packets lost vs. received
+- **Statistics**: Total packets received, lost, and duplicated
+
+### Display Options
+- **Console mode**: Use `--show-network` to display stats in VU header
+- **JSON mode**: Use `--json` for GUI integration with detailed metrics
+- **Verbose mode**: Detailed logging with all network statistics
+
+### Example Output
+```
+VBAN: StudioStream (192.168.1.100:6980) - 8 ch @ 48000 Hz | 12.45 Mbps | pkts 1250 lost 3 dup 1 loss 0.24%
+```
+
+### JSON Stats Format
+```json
+{
+  "type": "stats",
+  "bitrate_mbps": 12.45,
+  "packets_received": 1250,
+  "lost_packets": 3,
+  "duplicate_packets": 1,
+  "packet_loss_rate": 0.24,
+  "current_packet_rate": 10.2
+}
+```
+
 ## Troubleshooting
 
 ### No Audio Output
@@ -164,6 +206,29 @@ When not in verbose mode, the application displays real-time ASCII VU meters wit
 python3 vban_to_blackhole16.py --list-devices
 ```
 
+## GUI Application
+
+A PyQt6-based graphical interface is available for easier configuration and monitoring:
+
+### Features
+- **Visual VU meters**: Custom-drawn VU bars with peak indicators
+- **Network statistics**: Real-time display of bitrate, packet loss, and jitter
+- **Configuration panel**: Easy access to all command-line options
+- **Device listing**: Built-in device selection tool
+
+### Building the GUI
+```bash
+# Build standalone GUI application
+./scripts/build_gui_mac.sh
+
+# Or run directly with Python
+python3 gui/vban_gui.py
+```
+
+### GUI Requirements
+- **PyQt6**: Modern Qt bindings for Python
+- **Backend integration**: Communicates with main application via JSON
+
 ## Development
 
 ### Project Structure
@@ -171,7 +236,12 @@ python3 vban_to_blackhole16.py --list-devices
 ```
 vban-to-blackhole/
 ├── vban_to_blackhole16.py  # Main application
-├── vban_sample_analyzer.py # Optional analyzer tool
+├── gui/                    # GUI application
+│   └── vban_gui.py        # PyQt6 interface
+├── scripts/                # Build scripts
+│   ├── build_mac.sh       # CLI app build
+│   └── build_gui_mac.sh   # GUI app build
+├── local/                  # Linux systemd scripts
 ├── README.md               # This file
 └── requirements.txt        # Python dependencies
 ```
@@ -181,6 +251,7 @@ vban-to-blackhole/
 - **sounddevice**: Audio I/O via PortAudio
 - **soundfile**: WAV writing (libsndfile)
 - **numpy**: Audio data processing
+- **PyQt6**: GUI framework (for GUI application)
 
 ## License
 

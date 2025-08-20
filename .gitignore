@@ -3,6 +3,7 @@
 
 # Python
 __pycache__/
+gui/__pycache__/
 *.py[cod]
 *.so
 *.egg-info/
@@ -27,4 +28,8 @@ mirror.wav
 # IDE
 .vscode/
 .idea/
+
+# Local configuration and scripts
+local/
+
 

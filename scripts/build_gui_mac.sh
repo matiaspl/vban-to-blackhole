@@ -16,7 +16,16 @@ source .venv_build_gui/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt pyinstaller
 
-echo "[2/3] Building app bundle with PyInstaller..."
+echo "[2/3] Building backend console binary..."
+# Build standalone backend first so GUI can spawn it without Python
+pyinstaller \
+  --onefile \
+  --name vban-backend \
+  --clean \
+  --log-level=WARN \
+  vban_to_blackhole16.py
+
+echo "[3/3] Building app bundle with PyInstaller..."
 # --windowed: no console window; create a .app bundle
 # --add-data: bundle backend script; format src:dest (colon works on macOS)
 pyinstaller \
@@ -24,10 +33,10 @@ pyinstaller \
   --name "$APP_NAME" \
   --clean \
   --log-level=WARN \
-  --add-data "vban_to_blackhole16.py:." \
+  --add-binary "dist/vban-backend:backend" \
   "$ENTRYPOINT"
 
-echo "[3/3] Build complete"
+echo "Build complete"
 echo "App bundle: dist/$APP_NAME.app"
 echo
 echo "If Gatekeeper blocks execution, ad-hoc sign the app bundle:"
