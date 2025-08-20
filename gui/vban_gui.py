@@ -40,6 +40,7 @@ class App(QtWidgets.QWidget):
 
         self.worker: Worker | None = None
         self.device_info_cache = {}  # Cache device information for channel detection
+        self.current_channel_mapping = ""  # Store current channel mapping configuration
 
         self._build_ui()
 
@@ -95,9 +96,10 @@ class App(QtWidgets.QWidget):
         form.addWidget(self.blocksize, row, 3)
 
         row += 1
-        form.addWidget(QtWidgets.QLabel("Map (comma-separated):"), row, 0)
-        self.map_entry = QtWidgets.QLineEdit()
-        form.addWidget(self.map_entry, row, 1, 1, 3)
+        form.addWidget(QtWidgets.QLabel("Channel Mapping:"), row, 0)
+        self.map_btn = QtWidgets.QPushButton("Configure Channel Map")
+        self.map_btn.clicked.connect(self.open_channel_mapping)
+        form.addWidget(self.map_btn, row, 1, 1, 3)
 
         row += 1
         self.starve_fill = QtWidgets.QCheckBox("Starve fill")
@@ -138,9 +140,20 @@ class App(QtWidgets.QWidget):
         vu_section.addLayout(self.bars)
         layout.addLayout(vu_section)
         
+        # Divider between VU meters and stats
+        divider = QtWidgets.QFrame()
+        divider.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        divider.setFrameShadow(QtWidgets.QFrame.Shadow.Sunken)
+        divider.setStyleSheet("background-color: #bdc3c7; margin: 5px 0px;")
+        layout.addWidget(divider)
+        
         # Status bar below VU meters - truly responsive horizontal layout
-        status_bar = QtWidgets.QHBoxLayout()
+        status_bar_container = QtWidgets.QWidget()
+        status_bar_container.setFixedHeight(40)  # Fixed height for stats panel
+        
+        status_bar = QtWidgets.QHBoxLayout(status_bar_container)
         status_bar.setSpacing(20)
+        status_bar.setContentsMargins(10, 5, 10, 5)
         
         # Column 1: Jitter (expandable)
         jitter_section = QtWidgets.QHBoxLayout()
@@ -210,7 +223,7 @@ class App(QtWidgets.QWidget):
         rate_section.addStretch()  # Allow this section to expand
         status_bar.addLayout(rate_section, 1)  # Stretch factor 1
         
-        layout.addLayout(status_bar)
+        layout.addWidget(status_bar_container)
         self.bar_widgets: list[VUBar] = []
         self.db_labels: list[tuple[QtWidgets.QLabel, QtWidgets.QLabel]] = []
         
@@ -413,7 +426,7 @@ class App(QtWidgets.QWidget):
         
         if not self.starve_fill.isChecked():
             cmd.remove("--starve-fill")
-        map_str = self.map_entry.text().strip()
+        map_str = self.current_channel_mapping
         if map_str:
             cmd += ["--map", map_str]
 
@@ -565,6 +578,200 @@ class App(QtWidgets.QWidget):
         """Refresh the list of available audio output devices"""
         self.populate_device_list()
         QtWidgets.QMessageBox.information(self, "Sources Refreshed", "Audio output device list has been refreshed.")
+
+    def open_channel_mapping(self):
+        """Open a dialog to configure the channel mapping."""
+        # Get current device channel count for output channels
+        output_channels = 16  # Default
+        selected_device = self.output_device.currentData()
+        if selected_device and selected_device != "Custom...":
+            if selected_device in self.device_info_cache:
+                device_info = self.device_info_cache[selected_device]
+                output_channels = device_info.get("max_output_channels", 16)
+        
+        # Create and show the channel mapping dialog
+        dialog = ChannelMappingMatrix(input_channels=16, output_channels=output_channels, parent=self)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            map_string = dialog.get_map_string()
+            if map_string:
+                self.debug_print(f"Channel mapping applied: {map_string}")
+                # Store the mapping for use in the backend command
+                self.current_channel_mapping = map_string
+            else:
+                self.debug_print("No channel mapping configured")
+                self.current_channel_mapping = ""
+        else:
+            self.debug_print("Channel mapping dialog cancelled")
+
+
+class ChannelMappingMatrix(QtWidgets.QDialog):
+    """Channel mapping matrix dialog for configuring input to output channel mappings."""
+    
+    def __init__(self, input_channels=8, output_channels=16, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Channel Mapping Matrix")
+        self.resize(600, 500)
+        self.setModal(True)
+        
+        self.input_channels = input_channels
+        self.output_channels = output_channels
+        self.mapping_matrix = {}  # (input, output) -> bool
+        self.result_map_string = ""
+        
+        # Initialize default 1:1 mapping
+        for i in range(min(self.input_channels, self.output_channels)):
+            self.mapping_matrix[(i, i)] = True
+        
+        self._build_ui()
+    
+    def _build_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # Matrix container with scroll area
+        scroll_area = QtWidgets.QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        
+        # Matrix widget
+        matrix_widget = QtWidgets.QWidget()
+        matrix_layout = QtWidgets.QGridLayout(matrix_widget)
+        matrix_layout.setSpacing(5)
+        
+        # Create matrix headers (output channels)
+        for out_ch in range(self.output_channels):
+            header_label = QtWidgets.QLabel(f"Out{out_ch + 1}")
+            header_label.setStyleSheet("background-color: #34495e; color: white; padding: 3px; border-radius: 2px; font-weight: bold;")
+            header_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            header_label.setMinimumWidth(35)
+            matrix_layout.addWidget(header_label, 0, out_ch + 1)
+        
+        # Create matrix cells with checkboxes
+        self.checkbox_widgets = {}
+        for in_ch in range(self.input_channels):
+            # Input channel label
+            input_label = QtWidgets.QLabel(f"In{in_ch + 1}")
+            input_label.setStyleSheet("background-color: #2c3e50; color: white; padding: 3px; border-radius: 2px; font-weight: bold;")
+            input_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            input_label.setMinimumWidth(35)
+            matrix_layout.addWidget(input_label, in_ch + 1, 0)
+            
+            # Matrix checkboxes
+            for out_ch in range(self.output_channels):
+                checkbox = QtWidgets.QCheckBox()
+                checkbox.setChecked(self.mapping_matrix.get((in_ch, out_ch), False))
+                checkbox.stateChanged.connect(lambda state, i=in_ch, o=out_ch: self.on_checkbox_changed(i, o, state))
+                
+                # Store reference to checkbox
+                self.checkbox_widgets[(in_ch, out_ch)] = checkbox
+                
+                # Add to layout
+                matrix_layout.addWidget(checkbox, in_ch + 1, out_ch + 1)
+        
+        scroll_area.setWidget(matrix_widget)
+        layout.addWidget(scroll_area)
+        
+        # Legend
+        legend_layout = QtWidgets.QHBoxLayout()
+        legend_layout.addWidget(QtWidgets.QLabel("Legend:"))
+        
+        mapped_indicator = QtWidgets.QLabel("☑ = Mapped")
+        mapped_indicator.setStyleSheet("color: #27ae60; font-weight: bold;")
+        legend_layout.addWidget(mapped_indicator)
+        
+        unmapped_indicator = QtWidgets.QLabel("☐ = Unmapped")
+        unmapped_indicator.setStyleSheet("color: #95a5a6;")
+        legend_layout.addWidget(unmapped_indicator)
+        
+        legend_layout.addStretch()
+        layout.addLayout(legend_layout)
+        
+        # Action buttons
+        button_layout = QtWidgets.QHBoxLayout()
+        
+        apply_btn = QtWidgets.QPushButton("Apply")
+        apply_btn.setStyleSheet("background-color: #27ae60; color: white; padding: 8px 16px; border-radius: 4px; font-weight: bold;")
+        apply_btn.clicked.connect(self.apply_mapping)
+        button_layout.addWidget(apply_btn)
+        
+        reset_btn = QtWidgets.QPushButton("Reset to Default")
+        reset_btn.setStyleSheet("background-color: #e74c3c; color: white; padding: 8px 16px; border-radius: 4px; font-weight: bold;")
+        reset_btn.clicked.connect(self.reset_to_default)
+        button_layout.addWidget(reset_btn)
+        
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        cancel_btn.setStyleSheet("background-color: #95a5a6; color: white; padding: 8px 16px; border-radius: 4px; font-weight: bold;")
+        cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_btn)
+        
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
+    
+    def on_checkbox_changed(self, input_ch, output_ch, state):
+        """Handle checkbox state changes with constraint enforcement"""
+        if state == QtCore.Qt.CheckState.Checked.value:
+            # Check if this output is already mapped to another input
+            conflicting_input = None
+            for (i, o), checkbox in self.checkbox_widgets.items():
+                if o == output_ch and i != input_ch and checkbox.isChecked():
+                    conflicting_input = i
+                    break
+            
+            if conflicting_input is not None:
+                # Remove the conflicting mapping first
+                self.mapping_matrix.pop((conflicting_input, output_ch), None)
+                self.checkbox_widgets[(conflicting_input, output_ch)].setChecked(False)
+            
+            # Now add the new mapping
+            self.mapping_matrix[(input_ch, output_ch)] = True
+        else:
+            # Remove mapping
+            self.mapping_matrix.pop((input_ch, output_ch), None)
+        
+        # Update status (no longer displayed, but keep for debugging)
+        mapped_count = len(self.mapping_matrix)
+    
+    def reset_to_default(self):
+        """Reset to 1:1 mapping"""
+        # Reset to 1:1 mapping
+        self.mapping_matrix.clear()
+        for checkbox in self.checkbox_widgets.values():
+            checkbox.setChecked(False)
+        
+        for i in range(min(self.input_channels, self.output_channels)):
+            self.mapping_matrix[(i, i)] = True
+            self.checkbox_widgets[(i, i)].setChecked(True)
+    
+    def apply_mapping(self):
+        """Generate the map parameter string and close dialog"""
+        if not self.mapping_matrix:
+            self.result_map_string = ""
+        else:
+            # Create a list where index = output_channel, value = input_channel
+            # Initialize with None (unmapped)
+            output_mapping = [None] * self.output_channels
+            
+            # Fill in the mappings
+            for (in_ch, out_ch) in self.mapping_matrix.keys():
+                if self.mapping_matrix[(in_ch, out_ch)]:
+                    output_mapping[out_ch] = in_ch
+            
+            # Convert to the correct format: --map 2,1,3,3 means:
+            # out1 gets in2, out2 gets in1, out3 gets in3, out4 gets in3
+            mappings = []
+            for out_ch in range(self.output_channels):
+                if output_mapping[out_ch] is not None:
+                    mappings.append(str(output_mapping[out_ch] + 1))  # +1 for 1-based indexing
+                else:
+                    mappings.append("0")  # 0 means no mapping for this output
+            
+            self.result_map_string = ",".join(mappings)
+        
+        self.accept()
+    
+    def get_map_string(self):
+        """Return the generated map string"""
+        return self.result_map_string
 
 
 class VUBar(QtWidgets.QWidget):
